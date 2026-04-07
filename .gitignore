@@ -1,1 +1,2 @@
-Datasets/
+data/*.csv
+src/preprocessing/*.csv
