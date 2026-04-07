@@ -1,7 +1,12 @@
 import zipfile
 import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
 
+matplotlib.use("Agg")
 
+# decision node tree
 class DecisionTreeNode:
 
     def __init__(self):
@@ -15,7 +20,7 @@ class DecisionTreeNode:
         return self.value is not None
 
 
-# regression tree for predicting continuous values
+# regression tree
 class DecisionTree:
 
     def __init__(self, max_depth=4, min_samples_leaf=20):
@@ -23,14 +28,14 @@ class DecisionTree:
         self.min_samples_leaf = min_samples_leaf
         self.root = None
 
-    # training
-
+    # building tree
     def fit(self, X, y):
         self.root = self._build(X, y, depth=0)
 
     def _build(self, X, y, depth):
         node = DecisionTreeNode()
 
+        # stop conditions
         if (depth >= self.max_depth
                 or len(y) < 2 * self.min_samples_leaf
                 or np.std(y) < 1e-6):
@@ -39,20 +44,18 @@ class DecisionTree:
 
         best_feature, best_threshold = self._best_split(X, y)
 
-        # if no valid split found → leaf
         if best_feature is None:
             node.value = np.mean(y)
             return node
 
+        # splitting the data
         left_mask = X[:, best_feature] <= best_threshold
         right_mask = ~left_mask
 
-        # if either side is too small → leaf
         if left_mask.sum() < self.min_samples_leaf or right_mask.sum() < self.min_samples_leaf:
             node.value = np.mean(y)
             return node
 
-        # split and recurse
         node.feature_index = best_feature
         node.threshold = best_threshold
         node.left = self._build(X[left_mask], y[left_mask], depth + 1)
@@ -60,21 +63,21 @@ class DecisionTree:
 
         return node
 
+    # find the split that minimizes the weighted variance of the two groups
     def _best_split(self, X, y):
         best_feature = None
         best_threshold = None
-        best_loss = np.var(y) * len(y)
+        best_loss = np.var(y) * len(y)  # baseline: no split
 
         n_features = X.shape[1]
 
         for feature_idx in range(n_features):
             col = X[:, feature_idx]
 
-
             if np.nanmax(col) == np.nanmin(col):
                 continue
 
-
+            # sample candidate percentiles
             candidates = np.nanpercentile(col, np.linspace(5, 95, 20))
             candidates = np.unique(candidates)
 
@@ -98,7 +101,7 @@ class DecisionTree:
 
         return best_feature, best_threshold
 
-    # predictions
+    # prediction
     def predict(self, X):
         return np.array([self._traverse(row, self.root) for row in X])
 
@@ -110,9 +113,9 @@ class DecisionTree:
         else:
             return self._traverse(row, node.right)
 
-# gradient boosting: find disparities in errors -> learning -> update predictions
-class GradientBoostingRegressor:
 
+# gradient boosting for regression
+class GradientBoostingRegressor:
     def __init__(self, n_estimators=50, learning_rate=0.1,
                  max_depth=4, min_samples_leaf=20):
         self.n_estimators = n_estimators
@@ -122,8 +125,8 @@ class GradientBoostingRegressor:
         self.trees = []
         self.initial_pred = None
 
-
     def fit(self, X, y, X_val=None, y_val=None):
+
         # start with the mean
         self.initial_pred = np.mean(y)
         y_pred = np.full(len(y), self.initial_pred)
@@ -133,17 +136,14 @@ class GradientBoostingRegressor:
         print(f"  {'-' * 32}")
 
         for i in range(self.n_estimators):
-
             residuals = y - y_pred
 
-            # fit a tree to the residuals
             tree = DecisionTree(
                 max_depth=self.max_depth,
                 min_samples_leaf=self.min_samples_leaf,
             )
             tree.fit(X, residuals)
 
-            # update prediction
             y_pred += self.learning_rate * tree.predict(X)
 
             self.trees.append(tree)
@@ -165,3 +165,207 @@ class GradientBoostingRegressor:
         for tree in self.trees:
             y_pred += self.learning_rate * tree.predict(X)
         return y_pred
+
+
+# loading features
+print("=" * 55)
+print("  MBTA Delay Model — Gradient Boosting")
+print("=" * 55)
+
+print("\nLoading data...")
+
+ZIP_PATH = r"C:\Users\ryuli\Downloads\2022-06_HREvents.zip"
+CSV_NAME = "2022-06_HREvents.csv"
+STOPS_PATH = r"C:\Users\ryuli\Downloads\stops.txt"
+
+with zipfile.ZipFile(ZIP_PATH) as z:
+    with z.open(CSV_NAME) as f:
+        df = pd.read_csv(f)
+
+stops = pd.read_csv(STOPS_PATH, usecols=[
+    "stop_id", "stop_lat", "stop_lon", "municipality"
+])
+stops["stop_id"] = stops["stop_id"].astype(str)
+
+print(f"  Events : {len(df):,} rows")
+
+# filter arrivals
+arr = df[df["event_type"] == "ARR"].copy()
+
+arr.sort_values(["route_id", "stop_id", "direction_id", "event_time"], inplace=True)
+arr["stop_id"] = arr["stop_id"].astype(str)
+arr["prev_train_time"] = arr.groupby(
+    ["route_id", "stop_id", "direction_id"]
+)["event_time"].shift(1)
+arr["headway_sec"] = arr["event_time"] - arr["prev_train_time"]
+arr = arr[(arr["headway_sec"] > 60) & (arr["headway_sec"] < 3600)].copy()
+
+# time features
+arr["hour"] = (arr["event_time_sec"] // 3600) % 24
+arr["dow"] = pd.to_datetime(arr["service_date"]).dt.dayofweek
+arr["is_peak"] = arr["hour"].isin([7, 8, 9, 16, 17, 18, 19]).astype(int)
+arr["is_weekend"] = (arr["dow"] >= 5).astype(int)
+
+# target
+arr["scheduled_headway"] = arr.groupby(
+    ["route_id", "stop_id", "direction_id", "hour"]
+)["headway_sec"].transform("median")
+arr["headway_delay_sec"] = arr["headway_sec"] - arr["scheduled_headway"]
+
+# lag features
+arr.sort_values(["trip_id", "stop_sequence"], inplace=True)
+arr["lag_delay_1"] = arr.groupby("trip_id")["headway_delay_sec"].shift(1)
+arr["lag_delay_2"] = arr.groupby("trip_id")["headway_delay_sec"].shift(2)
+arr["cum_delay"] = arr.groupby("trip_id")["headway_delay_sec"].cumsum().shift(1)
+arr["stop_seq_norm"] = arr.groupby("trip_id")["stop_sequence"].transform(
+    lambda x: (x - x.min()) / (x.max() - x.min() + 1e-6)
+)
+
+# merge stops
+arr = arr.merge(stops, on="stop_id", how="left")
+
+# encode categories as integers
+arr["route_enc"] = arr["route_id"].map({"Red": 0, "Orange": 1, "Blue": 2}).fillna(-1)
+arr["muni_enc"] = arr["municipality"].astype("category").cat.codes
+
+FEATURES = [
+    "route_enc", "direction_id", "stop_sequence", "stop_seq_norm",
+    "stop_lat", "stop_lon", "muni_enc",
+    "hour", "dow", "is_weekend", "is_peak",
+    "headway_sec", "scheduled_headway",
+    "lag_delay_1", "lag_delay_2", "cum_delay",
+]
+TARGET = "headway_delay_sec"
+
+model_df = arr[FEATURES + [TARGET]].dropna(subset=[TARGET, "lag_delay_1"])
+
+# cap outliers
+p99 = model_df[TARGET].quantile(0.99)
+p01 = model_df[TARGET].quantile(0.01)
+model_df = model_df[
+    (model_df[TARGET] >= p01) & (model_df[TARGET] <= p99)
+    ].copy()
+
+print(f"  Model rows : {len(model_df):,}")
+
+SAMPLE = 30_000
+model_df = model_df.sample(SAMPLE, random_state=42)
+
+np.random.seed(42)
+idx = np.random.permutation(len(model_df))
+split = int(0.8 * len(model_df))
+train_idx = idx[:split]
+test_idx = idx[split:]
+
+X_all = model_df[FEATURES].values.astype(np.float64)
+y_all = model_df[TARGET].values.astype(np.float64)
+
+# fill NaNs with column median
+col_medians = np.nanmedian(X_all, axis=0)
+for col_i in range(X_all.shape[1]):
+    nan_mask = np.isnan(X_all[:, col_i])
+    X_all[nan_mask, col_i] = col_medians[col_i]
+
+X_train, y_train = X_all[train_idx], y_all[train_idx]
+X_test, y_test = X_all[test_idx], y_all[test_idx]
+
+print(f"  Train : {len(X_train):,}  |  Test : {len(X_test):,}")
+
+# training model
+print("\nTraining Gradient Boosting...")
+
+model = GradientBoostingRegressor(
+    n_estimators=50,  # 50 trees (kept low so it runs fast)
+    learning_rate=0.1,
+    max_depth=4,
+    min_samples_leaf=20,
+)
+
+model.fit(X_train, y_train, X_val=X_test, y_val=y_test)
+
+# evaluate
+
+print("\nEvaluating...")
+
+y_pred = model.predict(X_test)
+
+mae = np.mean(np.abs(y_test - y_pred))
+rmse = np.sqrt(np.mean((y_test - y_pred) ** 2))
+ss_res = np.sum((y_test - y_pred) ** 2)
+ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
+r2 = 1 - ss_res / ss_tot
+
+print(f"\n  MAE  : {mae:.1f}s  ({mae / 60:.2f} min)")
+print(f"  RMSE : {rmse:.1f}s  ({rmse / 60:.2f} min)")
+print(f"  R²   : {r2:.4f}")
+
+
+print("\nCalculating feature importances...")
+
+base_mae = np.mean(np.abs(y_test - y_pred))
+importances = []
+
+for i, feat in enumerate(FEATURES):
+    X_shuffled = X_test.copy()
+    np.random.shuffle(X_shuffled[:, i])  # break this feature's signal
+    shuffled_pred = model.predict(X_shuffled)
+    shuffled_mae = np.mean(np.abs(y_test - shuffled_pred))
+    importances.append(shuffled_mae - base_mae)  # how much worse did we get?
+
+importances = np.array(importances)
+imp_series = pd.Series(importances, index=FEATURES).sort_values()
+
+# plot
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+fig.suptitle(
+    "MBTA Delay Model\n"
+    f"(50 trees, lr=0.1, max_depth=4  |  n={SAMPLE:,} sample)",
+    fontsize=12
+)
+
+# feature importance
+colors = ["tomato" if v > 0 else "lightgray" for v in imp_series.values]
+axes[0].barh(imp_series.index, imp_series.values, color=colors)
+axes[0].set_xlabel("Increase in MAE when feature is shuffled (seconds)")
+axes[0].set_title("Feature Importance (permutation)")
+axes[0].axvline(0, color="black", linewidth=0.8)
+axes[0].grid(axis="x", alpha=0.3)
+
+# actual vs predicted
+axes[1].scatter(y_test, y_pred, alpha=0.2, s=8, color="steelblue")
+lims = [min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())]
+axes[1].plot(lims, lims, "r--", linewidth=1.2, label="Perfect prediction")
+axes[1].set_xlabel("Actual Delay (sec)")
+axes[1].set_ylabel("Predicted Delay (sec)")
+axes[1].set_title(f"Actual vs Predicted  (R²={r2:.3f})")
+axes[1].legend()
+axes[1].grid(alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(r"C:\Users\ryuli\Downloads\mbta_results.png", dpi=150, bbox_inches="tight")
+print("  Plot saved → mbta_results.png")
+
+# example prediction
+
+print("\nExample: Red Line, peak hour, 3-min lag delay")
+example = np.array([[
+    0,  # route_enc   (Red=0)
+    1,  # direction_id
+    100,  # stop_sequence
+    0.5,  # stop_seq_norm
+    42.36,  # stop_lat
+    -71.06,  # stop_lon
+    5,  # muni_enc    (Boston)
+    8,  # hour
+    1,  # dow         (Tuesday)
+    0,  # is_weekend
+    1,  # is_peak
+    540,  # headway_sec
+    360,  # scheduled_headway
+    180,  # lag_delay_1
+    90,  # lag_delay_2
+    270,  # cum_delay
+]])
+
+pred = model.predict(example)[0]
+print(f"  Predicted delay : {pred:.0f}s  ({pred / 60:.1f} min)")
