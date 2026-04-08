@@ -1,2 +1,3 @@
 data/*.csv
 src/preprocessing/*.csv
+../../data/final_data.csv.zip
