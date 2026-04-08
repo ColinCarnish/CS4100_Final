@@ -104,7 +104,7 @@ delay_val_cols = ['ARR', 'DEP', 'PRA', 'PRD', 'PRA_2', 'PRD_2']
 
  
 def preprocess_for_model():
-    data = pd.read_csv('data/final_data.csv')
+    data = pd.read_csv('Datasets/final_data.csv')
     # convert day of the week and month to their numerical representations to send to the model
     data["day_of_week_num"] = data["day_of_week"].map(day_map)
     data['month_num'] = data['service_date'].str[5:7].astype(int)
@@ -136,6 +136,7 @@ def preprocess_for_model():
 
     # add a column that contains a binary value (0 or 1) if there is a delay at the current stop, the prev stop, or the prev 2 stops for classification purposes
     final_data["delayed"] = ((final_data["ARR"] > 60) | (final_data["DEP"] > 60)).astype(int)
+    print(final_data["delayed"].value_counts())
     final_data["prev_delayed"] = ((final_data["PRA"] > 60) | (final_data["PRD"] > 60)).astype(int)
     final_data["prev_delayed_2"] = ((final_data["PRA_2"] > 60) | (final_data["PRD_2"] > 60)).astype(int)
 
@@ -188,9 +189,10 @@ def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
     dataset = TensorDataset(X_train, y_train, mask_train)
     loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
-    for epoch in range(30):
+    for epoch in range(20):
         model.train()
         total_loss = 0
+        best_val_loss = float('inf')
 
         for X_batch, y_batch, mask_batch in loader:
             optimizer.zero_grad()
@@ -208,6 +210,10 @@ def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
         train_loss = total_loss / len(loader)
 
         val_loss = evaluate_model(model, X_val, y_val, mask_val, criterion)
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), "models/model_storage/best_model.pt")
 
         print(f"Epoch {epoch}: Train={train_loss:.4f}, Val={val_loss:.4f}")
 
@@ -222,15 +228,81 @@ def evaluate_model(model, X, y, mask, criterion):
         loss = (loss * mask).sum() / (mask.sum() + 1e-8)
     
     return loss.item()
+
+def compute_metrics(outputs, y_true, mask, threshold=0.5):
+    """
+    Compute masked accuracy, precision, and recall for binary predictions.
     
-def main():
+    outputs: (batch, seq_len) raw probabilities from DelayPredictor
+    y_true: (batch, seq_len) ground truth 0/1
+    mask: (batch, seq_len) 0/1 mask indicating valid timesteps
+    threshold: probability cutoff to predict 1 (delayed)
+    """
+    # Convert probabilities to binary predictions
+    preds = (outputs > threshold).float()
+    
+    # Flatten and apply mask
+    masked_preds = preds[mask == 1]
+    masked_labels = y_true[mask == 1]
+    
+    accuracy = (masked_preds == masked_labels).float().mean().item()
+    
+    # Class 1 (delayed)
+    tp1 = ((masked_preds == 1) & (masked_labels == 1)).sum()
+    fp1 = ((masked_preds == 1) & (masked_labels == 0)).sum()
+    fn1 = ((masked_preds == 0) & (masked_labels == 1)).sum()
+    precision1 = tp1 / (tp1 + fp1 + 1e-8)
+    recall1 = tp1 / (tp1 + fn1 + 1e-8)
+
+    # Class 0 (not delayed)
+    tp0 = ((masked_preds == 0) & (masked_labels == 0)).sum()
+    fp0 = ((masked_preds == 0) & (masked_labels == 1)).sum()
+    fn0 = ((masked_preds == 1) & (masked_labels == 0)).sum()
+    precision0 = tp0 / (tp0 + fp0 + 1e-8)
+    recall0 = tp0 / (tp0 + fn0 + 1e-8)
+    
+    return accuracy, precision1, recall1, precision0, recall0
+    
+def main(train = True):
     X_padded, y_padded, mask = preprocess_for_model()
-    X_train, X_val, y_train, y_val, mask_train, mask_val = train_test_split(
-    X_padded, y_padded, mask, test_size=0.2
-    )
-    model = train(X_train, y_train, mask_train, X_val, y_val, mask_val)
     
-main()
+    # Step 1: Train + temp (val+test)
+    X_train, X_temp, y_train, y_temp, mask_train, mask_temp = train_test_split(
+        X_padded, y_padded, mask, test_size=0.3, random_state=42
+    )
+
+    # Step 2: Split temp into validation and test (50/50 of temp = 15% val, 15% test)
+    X_val, X_test, y_val, y_test, mask_val, mask_test = train_test_split(
+        X_temp, y_temp, mask_temp, test_size=0.5, random_state=42
+    )
+    if train:
+        model = train(X_train, y_train, mask_train, X_val, y_val, mask_val)
+    else:
+        test(X_test, y_test, mask_test)
+    
+# TODO: dont pass data like this
+def test(X_test, y_test, mask_test):
+    model = DelayPredictor(input_size=12, hidden_size=128)
+
+    # load weights
+    model.load_state_dict(torch.load("models/model_storage/best_model.pt"))
+
+    # eval mode
+    model.eval()
+
+    # run test batch
+    with torch.no_grad():
+        # send test data to the model
+        outputs = model(X_test)   
+        accuracy, precision1, recall1, precision0, recall0 = compute_metrics(outputs, y_test, mask_test)
+
+        print(f"Accuracy: {accuracy:.4f}")
+        print(f"Precision (predicting delayed): {precision1:.4f}")
+        print(f"Recall (predicting delayed): {recall1:.4f}") 
+        print(f"Precision (predicting not delayed): {precision0:.4f}")
+        print(f"Recall (predicting not delayed): {recall0:.4f}")
+    
+main(False)
     
     
     
