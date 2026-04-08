@@ -29,6 +29,9 @@ import torch
 import torch.nn as nn
 import pandas as pd
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.model_selection import train_test_split
+
 
 class CustomLSTM(nn.Module):
     def __init__(self, input_size, hidden_size):
@@ -101,7 +104,7 @@ delay_val_cols = ['ARR', 'DEP', 'PRA', 'PRD', 'PRA_2', 'PRD_2']
 
  
 def preprocess_for_model():
-    data = pd.read_csv('Datasets/2022_data.csv')
+    data = pd.read_csv('data/final_data.csv')
     # convert day of the week and month to their numerical representations to send to the model
     data["day_of_week_num"] = data["day_of_week"].map(day_map)
     data['month_num'] = data['service_date'].str[5:7].astype(int)
@@ -174,29 +177,58 @@ def preprocess_for_model():
     
     return X_padded, y_padded, mask
 
-def train(X_padded, y_padded, mask):
-    input_size = len(features)
-    hidden_size = 64
+def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
+    input_size = X_train.shape[-1]
+    hidden_size = 128
     model = DelayPredictor(input_size, hidden_size)
 
-    criterion = nn.BCELoss(reduction='none')  # should we mask manually?
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.BCEWithLogitsLoss(reduction='none')
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
-    # Example single training step
-    model.train()
-    optimizer.zero_grad()
-    outputs = model(X_padded)  # (batch, seq_len)
+    dataset = TensorDataset(X_train, y_train, mask_train)
+    loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
-    loss = criterion(outputs, y_padded)
-    loss = (loss * mask.float()).sum() / mask.sum()  # masked loss
-    loss.backward()
-    optimizer.step()
+    for epoch in range(30):
+        model.train()
+        total_loss = 0
 
-    print("Training step done. Loss:", loss.item())
+        for X_batch, y_batch, mask_batch in loader:
+            optimizer.zero_grad()
+
+            outputs = model(X_batch)
+
+            loss = criterion(outputs, y_batch)
+            loss = (loss * mask_batch).sum() / (mask_batch.sum() + 1e-8)
+
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        train_loss = total_loss / len(loader)
+
+        val_loss = evaluate_model(model, X_val, y_val, mask_val, criterion)
+
+        print(f"Epoch {epoch}: Train={train_loss:.4f}, Val={val_loss:.4f}")
+
+    return model
+        
+def evaluate_model(model, X, y, mask, criterion):
+    model.eval()
+    
+    with torch.no_grad():
+        outputs = model(X)
+        loss = criterion(outputs, y)
+        loss = (loss * mask).sum() / (mask.sum() + 1e-8)
+    
+    return loss.item()
     
 def main():
     X_padded, y_padded, mask = preprocess_for_model()
-    train(X_padded, y_padded, mask)
+    X_train, X_val, y_train, y_val, mask_train, mask_val = train_test_split(
+    X_padded, y_padded, mask, test_size=0.2
+    )
+    model = train(X_train, y_train, mask_train, X_val, y_val, mask_val)
     
 main()
     
