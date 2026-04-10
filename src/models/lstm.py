@@ -31,6 +31,7 @@ import pandas as pd
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
+import numpy as np
 
 
 class CustomLSTM(nn.Module):
@@ -98,7 +99,7 @@ day_map = {
     "Sunday": 6
 }  
 
-features = ['stop_sequence', 'ARR', 'DEP', 'PRA', 'PRD', 'PRA_2', 'PRD_2', 'day_of_week_num', 'prev_delayed', 'prev_delayed_2', 'month_num', 'hour']
+features = ['stop_sequence', 'ARR', 'DEP', 'PRA', 'PRD', 'PRA_2', 'PRD_2', 'day_of_week_num', 'prev_delayed', 'prev_delayed_2', 'month_num', 'hour', 'route_id_Blue', 'route_id_Red', 'route_id_Orange']
 target = ['delayed']
 delay_val_cols = ['ARR', 'DEP', 'PRA', 'PRD', 'PRA_2', 'PRD_2']
 
@@ -136,13 +137,16 @@ def preprocess_for_model():
 
     # add a column that contains a binary value (0 or 1) if there is a delay at the current stop, the prev stop, or the prev 2 stops for classification purposes
     final_data["delayed"] = ((final_data["ARR"] > 60) | (final_data["DEP"] > 60)).astype(int)
-    print(final_data["delayed"].value_counts())
     final_data["prev_delayed"] = ((final_data["PRA"] > 60) | (final_data["PRD"] > 60)).astype(int)
     final_data["prev_delayed_2"] = ((final_data["PRA_2"] > 60) | (final_data["PRD_2"] > 60)).astype(int)
 
     final_data = final_data.fillna(0)
     final_data = final_data.sort_values(["trip_id", "stop_sequence"])
     
+    return final_data
+
+def data_to_model(final_data):
+      
     # scale the delay values so they are all centered around a specific point and are comparable without some delay values outweighing others (?)
     delay_val_scaler = StandardScaler()
     final_data[delay_val_cols] = delay_val_scaler.fit_transform(final_data[delay_val_cols])
@@ -221,7 +225,7 @@ def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), "models/model_storage/best_model.pt")
+            torch.save(model.state_dict(), "src/models/model_storage/best_model.pt")
 
         print(f"Epoch {epoch}: Train={train_loss:.4f}, Val={val_loss:.4f}")
         epoch += 1
@@ -276,7 +280,8 @@ def compute_metrics(outputs, y_true, mask, threshold=0.5):
     return accuracy, precision1, recall1, precision0, recall0
     
 def main(is_train = True):
-    X_padded, y_padded, mask = preprocess_for_model()
+    final_data = preprocess_for_model()
+    X_padded, y_padded, mask = data_to_model(final_data)
     
     # Step 1: Train + temp (val+test)
     X_train, X_temp, y_train, y_temp, mask_train, mask_temp = train_test_split(
@@ -293,7 +298,7 @@ def main(is_train = True):
         test(X_test, y_test, mask_test)
     
 def test(X_test, y_test, mask_test):
-    model = DelayPredictor(input_size=12, hidden_size=128)
+    model = DelayPredictor(input_size=16, hidden_size=128)
 
     # load weights
     model.load_state_dict(torch.load("models/model_storage/best_model.pt"))
@@ -316,9 +321,180 @@ def test(X_test, y_test, mask_test):
             print(f"Recall (predicting delayed): {recall1:.4f}") 
             print(f"Precision (predicting not delayed): {precision0:.4f}")
             print(f"Recall (predicting not delayed): {recall0:.4f}")
-        
     
-main(False)
+# returns existing trips that go from the origin stop to the destination stop      
+def get_valid_trips(route_df, origin_stop, destination_stop):
+    trips = []
+    trips_in_route = route_df.groupby("trip_id")
+
+    for trip_id, trip in trips_in_route:
+        trip = trip.sort_values("stop_sequence")
+
+        stops = trip["stop_name"].values
+
+        if origin_stop in stops and destination_stop in stops:
+            origin_idx = trip[trip["stop_name"] == origin_stop]["stop_sequence"].values[0]
+            dest_idx = trip[trip["stop_name"] == destination_stop]["stop_sequence"].values[0]
+
+            # checks if the origin stop is before the dest stop in this trip (going in the right dir)
+            if origin_idx < dest_idx:
+                trips.append(trip_id)
+
+    return trips
+
+# get next possible arrival time at arrival stop and "trip" the user wants to go on
+def get_next_trip(route_df, trips, origin_stop, current_time_sec):
+    candidates = []
+    for trip_id in trips:
+        trip = route_df[route_df["trip_id"] == trip_id]
+
+        origin_row = trip[trip["stop_name"] == origin_stop]
+        origin_time = origin_row["arrival_time_sec"].values[0]
+
+        if origin_time >= current_time_sec:
+            candidates.append((trip_id, origin_time))
+
+    if not candidates:
+        return None
+
+    # earliest future trip
+    return sorted(candidates, key=lambda x: x[1])[0][0]
+
+# returns the entire expected route arr/dest info from origin -> destination 
+def build_trip_sequence(route_df, trip_id, origin_stop, destination_stop):
+    trip = route_df[route_df["trip_id"] == trip_id].copy()
+    # so the stops are in order
+    trip = trip.sort_values("stop_sequence")
+
+    origin_seq = trip[trip["stop_name"] == origin_stop]["stop_sequence"].values[0]
+    dest_seq = trip[trip["stop_name"] == destination_stop]["stop_sequence"].values[0]
+
+    seq = trip[(trip["stop_sequence"] >= origin_seq) &
+               (trip["stop_sequence"] <= dest_seq)].copy()
+
+    return seq
+
+def add_time_features(seq_df, current_dt):
+    seq_df = seq_df.copy()
+
+    seq_df["hour"] = current_dt.hour
+    seq_df["day_of_week_num"] = current_dt.weekday()
+    seq_df["month_num"] = current_dt.month
+
+    return seq_df
+
+# one hot encoding of the route
+def one_hot_encode_route(seq_df, route_cols, route):
+    for col in route_cols:
+        if col not in seq_df.columns:
+            if route in col:
+                seq_df[col] = 1
+            else:
+                seq_df[col] = 0
+
+    return seq_df
+
+# use existing knowledge of delay patterns for a specific route, stop, hour
+def estimate_prev_delayed(seq_df, expected_delay_dict, route_id):
+    prev = 0
+    prev2 = 0
+
+    prev_list = []
+    prev2_list = []
+
+    for _, row in seq_df.iterrows():
+        key = (
+            route_id,
+            row["stop_name"],
+            row["hour"],
+            row["day_of_week_num"]
+        )
+
+        exp_delay = expected_delay_dict.get(key, 0.1)
+
+        prev_list.append(prev)
+        prev2_list.append(prev2)
+
+        prev2 = prev
+        prev = exp_delay
+
+    seq_df["prev_delayed"] = prev_list
+    seq_df["prev_delayed_2"] = prev2_list
+
+    return seq_df
+
+def to_tensor(seq_df):
+    X = seq_df[features].values
+    print("shape of input", X.shape)
+    tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
+    print("shape of tensor", tensor.shape)
+    return tensor
+
+def time_to_seconds(dt):
+    return dt.hour * 3600 + dt.minute * 60 + dt.second
+    
+def predict_prob(model, X_tensor):
+    model.eval()
+    with torch.no_grad():
+        out = model(X_tensor)
+        probs = torch.sigmoid(out)
+
+    return probs.squeeze().numpy()
+            
+def predict(obs):
+    route, arr_stop, dest_stop, cur_datetime = obs
+    current_time_sec = time_to_seconds(cur_datetime)
+    # TODO: change to preprocessed data 
+    
+    expected_delay_dict = {}
+
+    grouped = final_data.groupby(
+        ["route_id", "stop_name", "hour", "day_of_week_num"]
+    )["delay_sec"].mean()
+    expected_delay_dict = grouped.to_dict()
+    
+    # filtering df to only include entries of a specific route 
+    route_df = final_data[final_data["route_id"] == route]
+    trips = get_valid_trips(route_df, arr_stop, dest_stop)
+    next_trip = get_next_trip(route_df, trips, arr_stop, current_time_sec)
+    trip_seq_df_1 = build_trip_sequence(route_df, next_trip, arr_stop, dest_stop)
+    trip_seq_df_2 = add_time_features(trip_seq_df_1, cur_datetime)
+    trip_seq_df_3 = one_hot_encode_route(trip_seq_df_2, features[12:], route)
+    final_seq_input = estimate_prev_delayed(trip_seq_df_3, expected_delay_dict, route)
+    filtered_input = final_seq_input[features]
+    
+    X = to_tensor(filtered_input)
+    
+    model = DelayPredictor(input_size=15, hidden_size=128)
+
+    # load weights of the best model
+    model.load_state_dict(torch.load("src/models/model_storage/best_model.pt"))
+
+    probs = predict_prob(model, X)
+
+    arrival_prob = probs[0]
+    destination_prob = probs[-1]
+    delayed = False
+    if destination_prob > 0.5 and arrival_prob > 0.5:
+        delayed = True
+        
+    return {
+        "arrival_stop_delay_prob": f'The next {route} Line train arriving at {arr_stop} has a {float(arrival_prob) * 100}% chance of being delayed',
+        "destination_stop_delay_prob": f'The {route} Line train heading to {dest_stop} has a {float(destination_prob) * 100}% chance of being delayed',
+        "delayed": delayed
+    }
+        
+
+if __name__ == "__main__":
+
+    final_data = preprocess_for_model()
+
+    obs = ["Orange", "Downtown Crossing", "Massachusetts Avenue",
+           pd.Timestamp(2026, 4, 9, 6, 30)]
+
+    print(predict(obs))
+    
+# main(True)
     
     
     
