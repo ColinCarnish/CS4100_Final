@@ -192,6 +192,9 @@ def data_to_model(final_data):
     val_df   = final_data[(final_data["service_date"] >= "2023-11-01") & 
                         (final_data["service_date"] < "2023-12-01")]
     test_df  = final_data[final_data["service_date"] >= "2023-12-01"]
+    train_df.to_csv("train_df.csv")
+    val_df.to_csv("val_df.csv")
+    test_df.to_csv("test_df.csv")
     print("LENGTHS:", len(train_df), len(val_df), len(test_df))
     
     # scale the delay values so they are all centered around a specific point and are comparable without some delay values outweighing others (?)
@@ -583,7 +586,7 @@ def predict(obs):
 
 #     print(predict(obs))
     
-main(True)
+main(False)
     
     
     
