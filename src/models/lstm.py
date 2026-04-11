@@ -32,6 +32,9 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
 import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import f1_score
+
 
 
 class CustomLSTM(nn.Module):
@@ -79,10 +82,12 @@ class DelayPredictor(nn.Module):
         super().__init__()
         self.lstm = CustomLSTM(input_size, hidden_size) # using LSTM we built from scratch
         self.fc = nn.Linear(hidden_size, 1)  # probability of delay per stop
+        self.dropout = nn.Dropout(0.2) # learn relationships instead of memorizing
     
     # predicting delay at each stop
     def forward(self, x):
         outputs, _ = self.lstm(x) # (batch, seq_len, hidden_size)
+        outputs = self.dropout(outputs)
         predictions = torch.sigmoid(self.fc(outputs)) # (batch, seq_len, 1)
         return predictions.squeeze(-1) # (batch, seq_len)
     
@@ -99,7 +104,7 @@ day_map = {
     "Sunday": 6
 }  
 
-features = ['stop_sequence', 'ARR', 'DEP', 'PRA', 'PRD', 'PRA_2', 'PRD_2', 'day_of_week_num', 'prev_delayed', 'prev_delayed_2', 'month_num', 'hour', 'route_id_Blue', 'route_id_Red', 'route_id_Orange']
+features = ['stop_sequence', 'PRA', 'PRD', 'PRA_2', 'PRD_2', 'day_of_week_num', 'month_num', 'hour', 'route_id_Blue', 'route_id_Red', 'route_id_Orange', 'travel_dur']
 target = ['delayed']
 delay_val_cols = ['ARR', 'DEP', 'PRA', 'PRD', 'PRA_2', 'PRD_2']
 
@@ -111,11 +116,26 @@ def preprocess_for_model():
     data['month_num'] = data['service_date'].str[5:7].astype(int)
     
     # combined the arrival and departure delay into one row per trip id and stop id
-    combined_data = data.pivot_table(
+    delay_df = data.pivot_table(
         index=["trip_id", "stop_sequence"],
         columns="event_type",
         values="delay_sec"
     ).reset_index()
+    
+    time_df = data[[
+        "trip_id",
+        "stop_sequence",
+        "arrival_time_sec",
+        "departure_time_sec"
+    ]].drop_duplicates()
+    
+    combined_data = delay_df.merge(
+        time_df,
+        on=["trip_id", "stop_sequence"],
+        how="left"
+    )
+    
+    combined_data = combined_data.sort_values(["trip_id", "stop_sequence"])
 
     # add a column for computing the arrival and departure delay at the previous stop per entry (delays usually have a domino effect)
     combined_data["PRA"] = combined_data.groupby("trip_id")["ARR"].shift(1)
@@ -124,6 +144,11 @@ def preprocess_for_model():
     # add a column for computing the arrival and departure delay at the previous 2 stops per entry
     combined_data["PRA_2"] = combined_data.groupby("trip_id")["ARR"].shift(2)
     combined_data["PRD_2"] = combined_data.groupby("trip_id")["DEP"].shift(2)
+    
+    
+    combined_data["prev_DEP_time"] = combined_data.groupby("trip_id")["departure_time_sec"].shift(1)
+    combined_data["travel_dur"] = combined_data["arrival_time_sec"] - combined_data["prev_DEP_time"]
+    combined_data = combined_data.dropna()
 
     # get the other columns not present in the pivot table
     other_cols = data.drop_duplicates(subset=["trip_id", "stop_sequence"])
@@ -134,26 +159,59 @@ def preprocess_for_model():
         on=["trip_id", "stop_sequence"],
         how="left"
     )
+    print("COLS:", final_data.columns)
 
     # add a column that contains a binary value (0 or 1) if there is a delay at the current stop, the prev stop, or the prev 2 stops for classification purposes
     final_data["delayed"] = ((final_data["ARR"] > 60) | (final_data["DEP"] > 60)).astype(int)
     final_data["prev_delayed"] = ((final_data["PRA"] > 60) | (final_data["PRD"] > 60)).astype(int)
     final_data["prev_delayed_2"] = ((final_data["PRA_2"] > 60) | (final_data["PRD_2"] > 60)).astype(int)
 
-    final_data = final_data.fillna(0)
-    final_data = final_data.sort_values(["trip_id", "stop_sequence"])
+    final_data = final_data.fillna(0) 
     
     return final_data
 
 def data_to_model(final_data):
-      
+
+    # add a column that contains a binary value (0 or 1) if there is a delay at the current stop, the prev stop, or the prev 2 stops for classification purposes
+    final_data["delayed"] = ((final_data["ARR"] > 60) | (final_data["DEP"] > 60)).astype(int)
+    print(final_data["delayed"].value_counts())
+    final_data["prev_delayed"] = ((final_data["PRA"] > 60) | (final_data["PRD"] > 60)).astype(int)
+    final_data["prev_delayed_2"] = ((final_data["PRA_2"] > 60) | (final_data["PRD_2"] > 60)).astype(int)
+
+    final_data = final_data.fillna(0)
+    final_data = final_data.sort_values(["trip_id", "stop_sequence"])
+    
+    # sort by time FIRST
+    final_data = final_data.sort_values("service_date")
+    final_data.to_csv("help.csv")
+    # define splits
+    print(final_data["service_date"].min())
+    print(final_data["service_date"].max())
+    
+    train_df = final_data[final_data["service_date"] < "2023-01-01"]
+    val_df   = final_data[(final_data["service_date"] >= "2023-11-01") & 
+                        (final_data["service_date"] < "2023-12-01")]
+    test_df  = final_data[final_data["service_date"] >= "2023-12-01"]
+    print("LENGTHS:", len(train_df), len(val_df), len(test_df))
+    
     # scale the delay values so they are all centered around a specific point and are comparable without some delay values outweighing others (?)
     delay_val_scaler = StandardScaler()
-    final_data[delay_val_cols] = delay_val_scaler.fit_transform(final_data[delay_val_cols])
+
+    # fit seperately for train, test, validation set
+    train_df[delay_val_cols] = delay_val_scaler.fit_transform(train_df[delay_val_cols])
+    val_df[delay_val_cols] = delay_val_scaler.transform(val_df[delay_val_cols])
+    test_df[delay_val_cols] = delay_val_scaler.transform(test_df[delay_val_cols])
     
+    X_train, y_train, mask_train = create_trip_seqs(train_df)
+    X_val, y_val, mask_val = create_trip_seqs(val_df)
+    X_test, y_test, mask_test = create_trip_seqs(test_df)
+    
+    return X_train, y_train, mask_train, X_val, y_val, mask_val, X_test, y_test, mask_test
+    
+def create_trip_seqs(df):
     # need to send the data to the model in sequences (num_trips, max_seq_len, num_features)    
     # Group by trip_id and sort by stop_sequence
-    trip_groups = final_data.groupby('trip_id')
+    trip_groups = df.groupby('trip_id')
 
     X_seqs = []
     y_seqs = []
@@ -189,14 +247,17 @@ def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
 
     # good for binary classification
     criterion = nn.BCEWithLogitsLoss(reduction='none')
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
 
     dataset = TensorDataset(X_train, y_train, mask_train)
     loader = DataLoader(dataset, batch_size=64, shuffle=True)
     count = 0
     prev_train_loss = 0
     epoch = 0
-    while count < 5:
+    wait = 10
+    train_losses = []
+    val_losses = []
+    for epoch in range(1000):
         model.train()
         total_loss = 0
         best_val_loss = float('inf')
@@ -206,31 +267,43 @@ def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
 
             outputs = model(X_batch)
 
-            loss = criterion(outputs, y_batch)
-            loss = (loss * mask_batch).sum() / (mask_batch.sum() + 1e-8)
+            bce_loss = criterion(outputs, y_batch)
+            
+            # 3. create weights (based on TRUE labels)
+            weights = torch.where(y_batch == 0, 2.0, 1.0)
+            
+             # 4. apply weights
+            loss = (bce_loss * weights).mean()
+            loss = (loss * mask_batch)
+            loss = loss.sum() / (mask_batch.sum() + 1e-8)
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             total_loss += loss.item()
 
         train_loss = total_loss / len(loader)
-        if train_loss == prev_train_loss:
-            count += 1
-        else:
-            count = 0
-        prev_train_loss = train_loss
-
         val_loss = evaluate_model(model, X_val, y_val, mask_val, criterion)
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_val_loss = val_loss
+            epochs_no_improve = 0
             torch.save(model.state_dict(), "src/models/model_storage/best_model.pt")
+        else:
+            epochs_no_improve += 1
+            
+        if epochs_no_improve >= wait:
+            print("Early stopping is triggered!")
+            break
 
         print(f"Epoch {epoch}: Train={train_loss:.4f}, Val={val_loss:.4f}")
         epoch += 1
 
-    return model
+    return model, train_losses, val_losses
         
 def evaluate_model(model, X, y, mask, criterion):
     model.eval()
@@ -272,36 +345,51 @@ def compute_metrics(outputs, y_true, mask, threshold=0.5):
     precision0 = tp0 / (tp0 + fp0 + 1e-8)
     recall0 = tp0 / (tp0 + fn0 + 1e-8)
     
+    # averages f1 for the delayed and not delayed class predictions
+    f1 = f1_score(y_true, outputs, average="macro")
+    
     # for durations: simple mean squared errors
     # for classifications: accuracy / precisions chart TP, FN, FP, TN
     # penalize for how high or how low classification is 
     # mse but values are 0 to 1 (maybe...)
     
-    return accuracy, precision1, recall1, precision0, recall0
+    return accuracy, precision1, recall1, precision0, recall0, f1
+
+def visualize_training_progress(train_losses, val_losses):
+    plt.figure()
+    plt.plot(train_losses, label="Train Loss")
+    plt.plot(val_losses, label="Validation Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training vs Validation Loss")
+    plt.legend()
+    plt.savefig("src/visualizations/lstm-train.png")
+    
     
 def main(is_train = True):
     final_data = preprocess_for_model()
-    X_padded, y_padded, mask = data_to_model(final_data)
+    X_train, y_train, mask_train, X_val, y_val, mask_val, X_test, y_test, mask_test = data_to_model(final_data)
     
-    # Step 1: Train + temp (val+test)
-    X_train, X_temp, y_train, y_temp, mask_train, mask_temp = train_test_split(
-        X_padded, y_padded, mask, test_size=0.3, random_state=42
-    )
+    # # Step 1: Train + temp (val+test)
+    # X_train, X_temp, y_train, y_temp, mask_train, mask_temp = train_test_split(
+    #     X_padded, y_padded, mask, test_size=0.3, random_state=42
+    # )
 
-    # Step 2: Split temp into validation and test (50/50 of temp = 15% val, 15% test)
-    X_val, X_test, y_val, y_test, mask_val, mask_test = train_test_split(
-        X_temp, y_temp, mask_temp, test_size=0.5, random_state=42
-    )
+    # # Step 2: Split temp into validation and test (50/50 of temp = 15% val, 15% test)
+    # X_val, X_test, y_val, y_test, mask_val, mask_test = train_test_split(
+    #     X_temp, y_temp, mask_temp, test_size=0.5, random_state=42
+    # )
     if is_train:
-        model = train(X_train, y_train, mask_train, X_val, y_val, mask_val)
+        model, train_losses, val_losses = train(X_train, y_train, mask_train, X_val, y_val, mask_val)
+        visualize_training_progress(train_losses, val_losses)
     else:
         test(X_test, y_test, mask_test)
     
 def test(X_test, y_test, mask_test):
-    model = DelayPredictor(input_size=16, hidden_size=128)
+    model = DelayPredictor(input_size=12, hidden_size=128)
 
     # load weights
-    model.load_state_dict(torch.load("models/model_storage/best_model.pt"))
+    model.load_state_dict(torch.load("src/models/model_storage/best_model.pt"))
 
     # eval mode
     model.eval()
@@ -313,7 +401,7 @@ def test(X_test, y_test, mask_test):
         for threshold in [0.3, 0.4, 0.5, 0.6, 0.7]:
             # Convert probabilities to binary predictions
             predictions = (outputs > threshold).float()
-            accuracy, precision1, recall1, precision0, recall0 = compute_metrics(predictions, y_test, mask_test)
+            accuracy, precision1, recall1, precision0, recall0, f1_score = compute_metrics(predictions, y_test, mask_test)
 
             print(f"Threshold: {threshold}")
             print(f"Accuracy: {accuracy:.4f}")
@@ -321,6 +409,7 @@ def test(X_test, y_test, mask_test):
             print(f"Recall (predicting delayed): {recall1:.4f}") 
             print(f"Precision (predicting not delayed): {precision0:.4f}")
             print(f"Recall (predicting not delayed): {recall0:.4f}")
+            print(f"F1 Score (predicting not delayed): {f1_score:.4f}")
     
 # returns existing trips that go from the origin stop to the destination stop      
 def get_valid_trips(route_df, origin_stop, destination_stop):
@@ -465,7 +554,7 @@ def predict(obs):
     
     X = to_tensor(filtered_input)
     
-    model = DelayPredictor(input_size=15, hidden_size=128)
+    model = DelayPredictor(input_size=12, hidden_size=128)
 
     # load weights of the best model
     model.load_state_dict(torch.load("src/models/model_storage/best_model.pt"))
@@ -485,16 +574,16 @@ def predict(obs):
     }
         
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    final_data = preprocess_for_model()
+#     final_data = preprocess_for_model()
 
-    obs = ["Orange", "Downtown Crossing", "Massachusetts Avenue",
-           pd.Timestamp(2026, 4, 9, 6, 30)]
+#     obs = ["Orange", "Downtown Crossing", "Massachusetts Avenue",
+#            pd.Timestamp(2026, 4, 9, 6, 30)]
 
-    print(predict(obs))
+#     print(predict(obs))
     
-# main(True)
+main(True)
     
     
     
