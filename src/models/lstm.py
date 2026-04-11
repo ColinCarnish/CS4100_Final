@@ -34,6 +34,9 @@ from sklearn.model_selection import train_test_split
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score
+from sklearn.metrics import (
+    confusion_matrix
+)
 
 
 
@@ -174,7 +177,6 @@ def data_to_model(final_data):
 
     # add a column that contains a binary value (0 or 1) if there is a delay at the current stop, the prev stop, or the prev 2 stops for classification purposes
     final_data["delayed"] = ((final_data["ARR"] > 60) | (final_data["DEP"] > 60)).astype(int)
-    print(final_data["delayed"].value_counts())
     final_data["prev_delayed"] = ((final_data["PRA"] > 60) | (final_data["PRD"] > 60)).astype(int)
     final_data["prev_delayed_2"] = ((final_data["PRA_2"] > 60) | (final_data["PRD_2"] > 60)).astype(int)
 
@@ -185,8 +187,6 @@ def data_to_model(final_data):
     final_data = final_data.sort_values("service_date")
     final_data.to_csv("help.csv")
     # define splits
-    print(final_data["service_date"].min())
-    print(final_data["service_date"].max())
     
     train_df = final_data[final_data["service_date"] < "2023-01-01"]
     val_df   = final_data[(final_data["service_date"] >= "2023-11-01") & 
@@ -195,6 +195,9 @@ def data_to_model(final_data):
     train_df.to_csv("train_df.csv")
     val_df.to_csv("val_df.csv")
     test_df.to_csv("test_df.csv")
+    print("train delayed vals:", train_df["delayed"].value_counts())
+    print("val delayed vals:", val_df["delayed"].value_counts())
+    print("test delayed vals:", test_df["delayed"].value_counts())
     print("LENGTHS:", len(train_df), len(val_df), len(test_df))
     
     # scale the delay values so they are all centered around a specific point and are comparable without some delay values outweighing others (?)
@@ -271,9 +274,8 @@ def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
             outputs = model(X_batch)
 
             bce_loss = criterion(outputs, y_batch)
-            
             # 3. create weights (based on TRUE labels)
-            weights = torch.where(y_batch == 0, 2.0, 1.0)
+            weights = torch.where(y_batch == 0, 1.5, 1.0)
             
              # 4. apply weights
             loss = (bce_loss * weights).mean()
@@ -332,32 +334,46 @@ def compute_metrics(outputs, y_true, mask, threshold=0.5):
     masked_preds = outputs[mask == 1]
     masked_actual = y_true[mask == 1]
     
+    cm = confusion_matrix(masked_actual, masked_preds)
+    tn, fp, fn, tp = cm.ravel() #retrieve the true negative, false positive, false negative, and true positive values from the matrix
+    
     accuracy = (masked_preds == masked_actual).float().mean().item()
     
     # Class 1 (delayed)
     tp1 = ((masked_preds == 1) & (masked_actual == 1)).sum()
     fp1 = ((masked_preds == 1) & (masked_actual == 0)).sum()
     fn1 = ((masked_preds == 0) & (masked_actual == 1)).sum()
-    precision1 = tp1 / (tp1 + fp1 + 1e-8)
-    recall1 = tp1 / (tp1 + fn1 + 1e-8)
+    precision_delayed = tp / (tp + fp + 1e-8)
+    recall_delayed = tp / (tp + fn + 1e-8)
+    
+    f1_delayed = (2 * precision_delayed * recall_delayed) / (precision_delayed + recall_delayed + 1e-8)
 
     # Class 0 (not delayed)
     tp0 = ((masked_preds == 0) & (masked_actual == 0)).sum()
     fp0 = ((masked_preds == 0) & (masked_actual == 1)).sum()
     fn0 = ((masked_preds == 1) & (masked_actual == 0)).sum()
-    precision0 = tp0 / (tp0 + fp0 + 1e-8)
-    recall0 = tp0 / (tp0 + fn0 + 1e-8)
+    precision_not_delayed = tn / (tn + fn + 1e-8)
+    recall_not_delayed = tn / (tn + fp + 1e-8)
     
-    # averages f1 for the delayed and not delayed class predictions
-    f1 = f1_score(y_true, outputs, average="macro")
+    f1_not_delayed = 2 * (precision_not_delayed * recall_not_delayed) / (precision_not_delayed + recall_not_delayed)
     
     # for durations: simple mean squared errors
     # for classifications: accuracy / precisions chart TP, FN, FP, TN
     # penalize for how high or how low classification is 
     # mse but values are 0 to 1 (maybe...)
     
-    return accuracy, precision1, recall1, precision0, recall0, f1
-
+    # return {
+    #     "accuracy": accuracy,
+    #     "precision_delayed": precision_delayed,
+    #     "recall_delayed": recall_delayed,
+    #     "f1_delayed": f1_delayed,
+    #     "precision_not_delayed": precision_not_delayed,
+    #     "recall_not_delayed": recall_not_delayed,
+    #     "f1_not_delayed": f1_not_delayed,
+    #     "confusion_matrix": (tn, fp, fn, tp)
+    # }
+    return accuracy, precision_delayed, recall_delayed, f1_delayed, precision_not_delayed, recall_not_delayed, f1_not_delayed, (tn, fp, fn, tp)
+    
 def visualize_training_progress(train_losses, val_losses):
     plt.figure()
     plt.plot(train_losses, label="Train Loss")
@@ -366,22 +382,13 @@ def visualize_training_progress(train_losses, val_losses):
     plt.ylabel("Loss")
     plt.title("Training vs Validation Loss")
     plt.legend()
-    plt.savefig("src/visualizations/lstm-train.png")
+    plt.savefig("src/visualizations/lstm-train-2.png")
     
     
 def main(is_train = True):
     final_data = preprocess_for_model()
     X_train, y_train, mask_train, X_val, y_val, mask_val, X_test, y_test, mask_test = data_to_model(final_data)
     
-    # # Step 1: Train + temp (val+test)
-    # X_train, X_temp, y_train, y_temp, mask_train, mask_temp = train_test_split(
-    #     X_padded, y_padded, mask, test_size=0.3, random_state=42
-    # )
-
-    # # Step 2: Split temp into validation and test (50/50 of temp = 15% val, 15% test)
-    # X_val, X_test, y_val, y_test, mask_val, mask_test = train_test_split(
-    #     X_temp, y_temp, mask_temp, test_size=0.5, random_state=42
-    # )
     if is_train:
         model, train_losses, val_losses = train(X_train, y_train, mask_train, X_val, y_val, mask_val)
         visualize_training_progress(train_losses, val_losses)
@@ -392,7 +399,7 @@ def test(X_test, y_test, mask_test):
     model = DelayPredictor(input_size=12, hidden_size=128)
 
     # load weights
-    model.load_state_dict(torch.load("src/models/model_storage/best_model.pt"))
+    model.load_state_dict(torch.load("src/models/model_storage/best_model_weights_2.pt"))
 
     # eval mode
     model.eval()
@@ -401,18 +408,31 @@ def test(X_test, y_test, mask_test):
     with torch.no_grad():
         # send test data to the model
         outputs = model(X_test)  
+        # 0.7 yields the best 
         for threshold in [0.3, 0.4, 0.5, 0.6, 0.7]:
             # Convert probabilities to binary predictions
             predictions = (outputs > threshold).float()
-            accuracy, precision1, recall1, precision0, recall0, f1_score = compute_metrics(predictions, y_test, mask_test)
+            num_zeros = (y_test == 0).sum().item()
+            num_ones = (y_test == 1).sum().item()
+
+            print("0s (not delayed):", num_zeros)
+            print("1s (delayed):", num_ones)
+            
+            lstm_metrics = compute_metrics(predictions, y_test, mask_test)
+            accuracy, precision_delayed, recall_delayed, f1_delayed, precision_not_delayed, recall_not_delayed, f1_not_delayed, cn_matrix = lstm_metrics
+            
+            tn, fp, fn, tp = cn_matrix[0], cn_matrix[1], cn_matrix[2], cn_matrix[3]
+            print(f"\n Confusion Matrix")
+            print(f"TN (correclty predicted not delayed)={tn} \n FP (falsely predicted as delayed)={fp} \n FN (falsely predicted as not delayed)={fn} \n TP (correctly predicted as delayed)={tp}")
 
             print(f"Threshold: {threshold}")
             print(f"Accuracy: {accuracy:.4f}")
-            print(f"Precision (predicting delayed): {precision1:.4f}")
-            print(f"Recall (predicting delayed): {recall1:.4f}") 
-            print(f"Precision (predicting not delayed): {precision0:.4f}")
-            print(f"Recall (predicting not delayed): {recall0:.4f}")
-            print(f"F1 Score (predicting not delayed): {f1_score:.4f}")
+            print(f"Precision (predicting delayed): {precision_delayed:.4f}")
+            print(f"Recall (predicting delayed): {recall_delayed:.4f}") 
+            print(f"Precision (predicting not delayed): {precision_not_delayed:.4f}")
+            print(f"Recall (predicting not delayed): {recall_not_delayed:.4f}")
+            print(f"F1 Score (predicting delayed): {f1_delayed:.4f}")
+            print(f"F1 Score (predicting not delayed): {f1_not_delayed:.4f}")
     
 # returns existing trips that go from the origin stop to the destination stop      
 def get_valid_trips(route_df, origin_stop, destination_stop):
