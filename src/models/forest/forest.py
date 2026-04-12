@@ -414,7 +414,14 @@ def save_model_artifact(
 
 class _ArtifactUnpickler(pickle.Unpickler):
     def find_class(self, module: str, name: str):
-        if module == "__main__" and name in {
+        if module in {
+            "__main__",
+            "forest",
+            "models.forest.forest",
+            "src.models.forest",
+            "src.models.forest.forest",
+        } and name in {
+            "RandomForestRegressor",
             "RandomForestRegressorScratch",
             "DecisionTreeRegressorScratch",
             "TreeNode",
@@ -498,7 +505,7 @@ def main() -> None:
     parser.add_argument(
         "--artifact-path",
         type=str,
-        default="models/forest/artifacts/random_forest_delay_model.pkl",
+        default="src/models/forest/artifacts/random_forest_delay_model.pkl",
         help="Where to save the trained model artifact pickle file.",
     )
     parser.add_argument(
@@ -541,7 +548,12 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
     script_path = Path(__file__).resolve()
-    csv_path = script_path.parents[2] / "Datasets" / "final_data.csv"
+    candidate_csv_paths = [
+        script_path.parents[3] / "Datasets" / "final_data.csv",
+        script_path.parents[2] / "Datasets" / "final_data.csv",
+        Path.cwd() / "Datasets" / "final_data.csv",
+    ]
+    csv_path = next((p for p in candidate_csv_paths if p.exists()), candidate_csv_paths[0])
 
     max_rows = args.max_rows if args.max_rows and args.max_rows > 0 else None
     x, y, feature_names, timestamps = load_features_and_target(
