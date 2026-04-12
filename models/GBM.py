@@ -12,9 +12,9 @@ class DecisionTreeNode:
     def __init__(self):
         self.feature_index = None  # which feature to split on
         self.threshold = None  # value to split at
-        self.left = None  # left child node  (value <= threshold)
-        self.right = None  # right child node (value >  threshold)
-        self.value = None  # leaf prediction (set if this is a leaf)
+        self.left = None  # left child node  
+        self.right = None  # right child node 
+        self.value = None  # leaf prediction 
 
     def is_leaf(self):
         return self.value is not None
@@ -187,7 +187,7 @@ print(f"  Events : {len(df):,} rows")
 arr = df[df["event_type"] == "ARR"].copy()
 print(f"  ARR rows : {len(arr):,}")
 
-# encode route as integer (dataset already has one-hot cols but we use label enc for simplicity)
+# encode route as integer
 arr["route_enc"] = arr["route_id"].map({"Red": 0, "Orange": 1, "Blue": 2}).fillna(-1)
 
 # encode day of week as integer
@@ -215,9 +215,9 @@ arr["stop_seq_norm"] = arr.groupby("trip_id")["stop_sequence"].transform(
 # encode stop name as integer category
 arr["stop_enc"] = arr["stop_name"].astype("category").cat.codes
 
+# build feature list — direction_id added only if present in dataset
 FEATURES = [
     "route_enc",        # line (Red/Orange/Blue)
-    "direction_id" if "direction_id" in arr.columns else "route_enc",  # fallback
     "stop_sequence",    # position along route
     "stop_seq_norm",    # normalised position
     "stop_enc",         # which stop
@@ -230,9 +230,10 @@ FEATURES = [
     "cum_delay",        # cumulative delay so far in trip
 ]
 
-# use direction_id if available, otherwise drop it
-if "direction_id" not in arr.columns:
-    FEATURES = [f for f in FEATURES if f != "direction_id"]
+if "direction_id" in arr.columns:
+    FEATURES.insert(1, "direction_id")
+
+print(f"  Features ({len(FEATURES)}): {FEATURES}")
 
 TARGET = "delay_sec"
 
@@ -341,21 +342,26 @@ plt.tight_layout()
 plt.savefig(r"C:\Users\ryuli\Downloads\mbta_results.png", dpi=150, bbox_inches="tight")
 print("  Plot saved → mbta_results.png")
 
-# example prediction
+# example prediction 
+# if direction_id was added, insert its value at position 1
 print("\nExample: Red Line, peak hour, 3-min lag delay")
-example = np.array([[
+example_values = [
     0,      # route_enc     (Red=0)
     100,    # stop_sequence
     0.5,    # stop_seq_norm
-    10,     # stop_enc      (arbitrary stop)
+    10,     # stop_enc
     8,      # hour
-    1,      # dow           (Tuesday)
+    1,      # dow           (Tuesday=1)
     0,      # is_weekend
     1,      # is_peak
     180,    # lag_delay_1   (3 min delay at previous stop)
     90,     # lag_delay_2
     270,    # cum_delay
-]])
+]
 
+if "direction_id" in FEATURES:
+    example_values.insert(1, 1)  
+
+example = np.array([example_values])
 pred = model.predict(example)[0]
 print(f"  Predicted delay : {pred:.0f}s  ({pred / 60:.1f} min)")
