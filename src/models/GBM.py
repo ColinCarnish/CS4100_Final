@@ -375,7 +375,7 @@ plt.tight_layout()
 plt.savefig(r"C:\Users\ryuli\Downloads\mbta_results.png", dpi=150, bbox_inches="tight")
 print("  Plot saved → mbta_results.png")
 
-# EXAMPLE: 
+# EXAMPLE:
 print("\nLoading model from pickle and predicting...")
 loaded_model, loaded_features, loaded_target = load_model(ARTIFACT_PATH)
 
@@ -402,3 +402,147 @@ if "direction_id" in loaded_features:
 example = np.array([example_values])
 pred = loaded_model.predict(example)[0]
 print(f"  Predicted delay : {pred:.0f}s  ({pred / 60:.1f} min)")
+
+
+class ReadyGBM:
+    def __init__(
+            self,
+            artifact_path: str = "src/models/model_storage/gbm_delay_model.pkl",
+            data_path: str = "Datasets/final_data.csv",
+    ) -> None:
+        # load the saved model and feature list from pickle
+        model, feature_names, target_name = load_model(artifact_path)
+        self.model = model
+        self.feature_names = feature_names
+
+        # load just the columns needed to find trips and build stop sequences
+        self.df = pd.read_csv(
+            data_path,
+            usecols=[
+                "route_id",
+                "trip_id",
+                "stop_id",
+                "stop_name",
+                "stop_sequence",
+                "arrival_time_sec",
+                "day_of_week",
+                "hour",
+                "delay_sec",
+            ],
+            low_memory=False,
+        )
+        self.df["stop_sequence"] = pd.to_numeric(self.df["stop_sequence"], errors="coerce")
+        self.df["arrival_time_sec"] = pd.to_numeric(self.df["arrival_time_sec"], errors="coerce")
+        self.df = self.df.dropna(subset=["trip_id", "stop_name", "stop_sequence", "arrival_time_sec"])
+
+    def time_to_seconds(self, dt) -> int:
+        return dt.hour * 3600 + dt.minute * 60 + dt.second
+
+    def get_valid_trips(self, route_df, origin_stop, destination_stop):
+        trips = []
+        for trip_id, trip in route_df.groupby("trip_id"):
+            ordered = trip.sort_values("stop_sequence")
+            stops = ordered["stop_name"].values
+            if origin_stop not in stops or destination_stop not in stops:
+                continue
+            origin_seq = ordered[ordered["stop_name"] == origin_stop]["stop_sequence"].values[0]
+            dest_seq = ordered[ordered["stop_name"] == destination_stop]["stop_sequence"].values[0]
+            if origin_seq < dest_seq:
+                trips.append(trip_id)
+        return trips
+
+    def get_next_trip(self, route_df, trips, origin_stop, current_time_sec):
+        candidates = []
+        for trip_id in trips:
+            trip = route_df[route_df["trip_id"] == trip_id]
+            origin_row = trip[trip["stop_name"] == origin_stop]
+            if origin_row.empty:
+                continue
+            origin_time = float(origin_row["arrival_time_sec"].values[0])
+            if origin_time >= current_time_sec:
+                candidates.append((trip_id, origin_time))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda x: x[1])[0]
+
+    def build_trip_sequence(self, route_df, trip_id, origin_stop, destination_stop):
+        trip = route_df[route_df["trip_id"] == trip_id].copy().sort_values("stop_sequence")
+        origin_seq = trip[trip["stop_name"] == origin_stop]["stop_sequence"].values[0]
+        dest_seq = trip[trip["stop_name"] == destination_stop]["stop_sequence"].values[0]
+        return trip[
+            (trip["stop_sequence"] >= origin_seq) &
+            (trip["stop_sequence"] <= dest_seq)
+            ].copy()
+
+    # build the feature array
+    def _prepare_features(self, trip_seq_df, cur_datetime):
+        df = trip_seq_df.copy()
+
+        # route encoding
+        df["route_enc"] = df["route_id"].map({"Red": 0, "Orange": 1, "Blue": 2}).fillna(-1)
+
+        # time features from the input datetime
+        dow_map = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+                   "Friday": 4, "Saturday": 5, "Sunday": 6}
+        day_name = cur_datetime.strftime("%A")
+        df["dow"] = dow_map.get(day_name, 0)
+        df["hour"] = cur_datetime.hour
+        df["is_peak"] = int(cur_datetime.hour in [7, 8, 9, 16, 17, 18, 19])
+        df["is_weekend"] = int(cur_datetime.weekday() >= 5)
+
+        # stop position features
+        seq_min = df["stop_sequence"].min()
+        seq_max = df["stop_sequence"].max()
+        df["stop_seq_norm"] = (df["stop_sequence"] - seq_min) / (seq_max - seq_min + 1e-6)
+
+        # stop encoding — use existing delay_sec median per stop as a proxy
+        df["stop_enc"] = df["stop_name"].astype("category").cat.codes
+
+        # lag features — use actual delay_sec shifted within the trip sequence
+        df = df.sort_values("stop_sequence")
+        df["lag_delay_1"] = df["delay_sec"].shift(1)
+        df["lag_delay_2"] = df["delay_sec"].shift(2)
+        df["cum_delay"] = df["delay_sec"].cumsum().shift(1)
+        df[["lag_delay_1", "lag_delay_2", "cum_delay"]] = (
+            df[["lag_delay_1", "lag_delay_2", "cum_delay"]].fillna(0)
+        )
+
+        # build array in the exact feature order the model was trained on
+        for col in self.feature_names:
+            if col not in df.columns:
+                df[col] = 0
+
+        X = df[self.feature_names].values.astype(np.float64)
+        return X, df
+
+    def _format_delay(self, seconds: float) -> str:
+        return f"{seconds:.0f} sec ({seconds / 60:.1f} min)"
+
+    def predict(self, obs):
+        route, arr_stop, dest_stop, cur_datetime = obs
+        current_time_sec = self.time_to_seconds(cur_datetime)
+
+        route_df = self.df[self.df["route_id"] == route]
+        valid_trips = self.get_valid_trips(route_df, arr_stop, dest_stop)
+        next_trip = self.get_next_trip(route_df, valid_trips, arr_stop, current_time_sec)
+
+        if next_trip is None:
+            raise ValueError("No future trip found for this route and stop selection.")
+
+        trip_seq_df = self.build_trip_sequence(route_df, next_trip, arr_stop, dest_stop)
+        X, _ = self._prepare_features(trip_seq_df, cur_datetime)
+        predictions = self.model.predict(X)
+
+        arrival_delay = float(predictions[0])
+        destination_delay = float(predictions[-1])
+
+        return trip_seq_df, {
+            "Arrival at Starting Point Delay": (
+                f"The next {route} Line train arriving at {arr_stop} is predicted to be "
+                f"{self._format_delay(arrival_delay)} from schedule."
+            ),
+            "Arrival at Destination Delay": (
+                f"The {route} Line train heading to {dest_stop} is predicted to be "
+                f"{self._format_delay(destination_delay)} from schedule."
+            ),
+        }
