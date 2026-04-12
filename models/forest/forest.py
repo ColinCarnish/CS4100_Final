@@ -193,7 +193,7 @@ class DecisionTreeRegressorScratch:
         return best_feature, best_threshold, best_gain
 
 
-class RandomForestRegressorScratch:
+class RandomForestRegressor:
     def __init__(
         self,
         n_estimators: int = 20,
@@ -394,7 +394,7 @@ def load_features_and_target(
 
 
 def save_model_artifact(
-    model: RandomForestRegressorScratch,
+    model: RandomForestRegressor,
     feature_names: list[str],
     artifact_path: str,
 ) -> None:
@@ -541,12 +541,7 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
     script_path = Path(__file__).resolve()
-    candidate_csv_paths = [
-        script_path.parents[2] / "Datasets" / "final_data.csv",
-        # script_path.parents[1] / "Datasets" / "final_data.csv",
-        # Path.cwd() / "Datasets" / "final_data.csv",
-    ]
-    csv_path = next((p for p in candidate_csv_paths if p.exists()), candidate_csv_paths[0])
+    csv_path = script_path.parents[2] / "Datasets" / "final_data.csv"
 
     max_rows = args.max_rows if args.max_rows and args.max_rows > 0 else None
     x, y, feature_names, timestamps = load_features_and_target(
@@ -590,7 +585,7 @@ def main() -> None:
         args.max_features_mode,
     )
 
-    model = RandomForestRegressorScratch(
+    model = RandomForestRegressor(
         n_estimators=args.n_estimators,
         max_depth=14,
         min_samples_split=25,
