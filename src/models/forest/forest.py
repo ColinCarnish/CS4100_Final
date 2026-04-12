@@ -310,11 +310,19 @@ def _encode_categorical_columns(df: pd.DataFrame) -> pd.DataFrame:
             errors="coerce",
         ).fillna(-1).astype(np.int32)
     if "departure_time_sec" in encoded.columns or "arrival_time_sec" in encoded.columns:
-        dep_raw = encoded["departure_time_sec"] if "departure_time_sec" in encoded.columns else np.nan
-        arr_raw = encoded["arrival_time_sec"] if "arrival_time_sec" in encoded.columns else np.nan
-        dep = pd.to_numeric(dep_raw, errors="coerce")
-        arr = pd.to_numeric(arr_raw, errors="coerce")
-        encoded["scheduled_time_sec"] = dep.fillna(arr)
+        dep_raw = (
+            encoded["departure_time_sec"]
+            if "departure_time_sec" in encoded.columns
+            else pd.Series(np.nan, index=encoded.index, dtype=float)
+        )
+        arr_raw = (
+            encoded["arrival_time_sec"]
+            if "arrival_time_sec" in encoded.columns
+            else pd.Series(np.nan, index=encoded.index, dtype=float)
+        )
+        dep = pd.Series(pd.to_numeric(dep_raw, errors="coerce"), index=encoded.index, dtype=float)
+        arr = pd.Series(pd.to_numeric(arr_raw, errors="coerce"), index=encoded.index, dtype=float)
+        encoded["scheduled_time_sec"] = dep.where(dep.notna(), arr)
     if "stop_id" in encoded.columns:
         stop_str = encoded["stop_id"].astype(str)
         stop_hash = pd.util.hash_pandas_object(stop_str, index=False).to_numpy(dtype=np.uint64)
@@ -441,6 +449,129 @@ def load_model_artifact(artifact_path: str) -> dict:
     if "model" not in artifact or "feature_names" not in artifact:
         raise ValueError("Artifact is missing required keys: 'model' and 'feature_names'.")
     return artifact
+
+
+class ReadyForest:
+    def __init__(
+        self,
+        artifact_path: str = "src/models/model_storage/forest.pkl",
+        data_path: str = "Datasets/final_data.csv",
+    ) -> None:
+        artifact = load_model_artifact(artifact_path)
+        self.model = artifact["model"]
+        self.feature_names = artifact["feature_names"]
+        self.df = pd.read_csv(
+            data_path,
+            usecols=[
+                "route_id",
+                "trip_id",
+                "stop_id",
+                "stop_name",
+                "stop_sequence",
+                "arrival_time_sec",
+            ],
+            low_memory=False,
+        )
+        self.df["stop_sequence"] = pd.to_numeric(self.df["stop_sequence"], errors="coerce")
+        self.df["arrival_time_sec"] = pd.to_numeric(self.df["arrival_time_sec"], errors="coerce")
+        self.df = self.df.dropna(subset=["trip_id", "stop_name", "stop_sequence", "arrival_time_sec"])
+
+    def time_to_seconds(self, dt) -> int:
+        return dt.hour * 3600 + dt.minute * 60 + dt.second
+
+    def get_valid_trips(
+        self,
+        route_df: pd.DataFrame,
+        origin_stop: str,
+        destination_stop: str,
+    ) -> list[str]:
+        trips: list[str] = []
+        trips_in_route = route_df.groupby("trip_id")
+
+        for trip_id, trip in trips_in_route:
+            ordered_trip = trip.sort_values("stop_sequence")
+            stops = ordered_trip["stop_name"].values
+            if origin_stop not in stops or destination_stop not in stops:
+                continue
+            origin_idx = ordered_trip[ordered_trip["stop_name"] == origin_stop]["stop_sequence"].values[0]
+            dest_idx = ordered_trip[ordered_trip["stop_name"] == destination_stop]["stop_sequence"].values[0]
+            if origin_idx < dest_idx:
+                trips.append(trip_id)
+
+        return trips
+
+    def get_next_trip(
+        self,
+        route_df: pd.DataFrame,
+        trips: list[str],
+        origin_stop: str,
+        current_time_sec: int,
+    ) -> Optional[str]:
+        candidates: list[tuple[str, float]] = []
+        for trip_id in trips:
+            trip = route_df[route_df["trip_id"] == trip_id]
+            origin_row = trip[trip["stop_name"] == origin_stop]
+            if origin_row.empty:
+                continue
+            origin_time = float(origin_row["arrival_time_sec"].values[0])
+            if origin_time >= current_time_sec:
+                candidates.append((trip_id, origin_time))
+
+        if not candidates:
+            return None
+
+        return min(candidates, key=lambda item: item[1])[0]
+
+    def build_trip_sequence(
+        self,
+        route_df: pd.DataFrame,
+        trip_id: str,
+        origin_stop: str,
+        destination_stop: str,
+    ) -> pd.DataFrame:
+        trip = route_df[route_df["trip_id"] == trip_id].copy().sort_values("stop_sequence")
+        origin_seq = trip[trip["stop_name"] == origin_stop]["stop_sequence"].values[0]
+        dest_seq = trip[trip["stop_name"] == destination_stop]["stop_sequence"].values[0]
+        return trip[(trip["stop_sequence"] >= origin_seq) & (trip["stop_sequence"] <= dest_seq)].copy()
+
+    def _format_delay(self, seconds: float) -> str:
+        return f"{seconds:.0f} sec ({seconds / 60.0:.1f} min)"
+
+    def predict(self, obs):
+        route, arr_stop, dest_stop, cur_datetime = obs
+        current_time_sec = self.time_to_seconds(cur_datetime)
+        route_df = self.df[self.df["route_id"] == route]
+
+        valid_trips = self.get_valid_trips(route_df, arr_stop, dest_stop)
+        next_trip = self.get_next_trip(route_df, valid_trips, arr_stop, current_time_sec)
+        if next_trip is None:
+            raise ValueError("No future trip found for this route and stop selection.")
+
+        trip_seq_df = self.build_trip_sequence(route_df, next_trip, arr_stop, dest_stop)
+        inference_df = trip_seq_df.copy()
+        inference_df["service_date"] = pd.Timestamp(cur_datetime).date().isoformat()
+        inference_df["hour"] = pd.Timestamp(cur_datetime).hour
+        inference_df["event_type"] = "ARR"
+        inference_df["arrival_time_sec"] = pd.to_numeric(
+            inference_df["arrival_time_sec"],
+            errors="coerce",
+        )
+
+        x_input, _ = prepare_features(inference_df, self.feature_names)
+        predictions = self.model.predict(x_input)
+        arrival_delay = float(predictions[0])
+        destination_delay = float(predictions[-1])
+
+        return trip_seq_df, {
+            "Arrival at Starting Point Delay": (
+                f"The next {route} Line train arriving at {arr_stop} is predicted to be "
+                f"{self._format_delay(arrival_delay)} from schedule."
+            ),
+            "Arrival at Destination Delay": (
+                f"The {route} Line train heading to {dest_stop} is predicted to be "
+                f"{self._format_delay(destination_delay)} from schedule."
+            ),
+        }
 
 
 def train_test_split(
