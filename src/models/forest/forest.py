@@ -277,6 +277,10 @@ class RandomForestRegressor:
         return np.mean(tree_predictions, axis=0)
 
 
+# Backward-compatible alias for older pickle artifacts.
+RandomForestRegressorScratch = RandomForestRegressor
+
+
 def _encode_categorical_columns(df: pd.DataFrame) -> pd.DataFrame:
     encoded = df.copy()
     if "service_date" in encoded.columns:
