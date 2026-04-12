@@ -107,17 +107,18 @@ if st.button("Predict Delay Likelihood", type="primary"):
     input = [route, arr_stop, dest_stop, selected_datetime]
 
     with st.spinner("Predicting delay likelihood..."):
-        # predicting probability of delay with lstm
-        trip_sq_df, prediction = lstm_probability_model.predict(input)
-        stop_ids = trip_sq_df[['stop_id']]
-        display_route(stop_ids)
-        st.write(prediction)
-    
-        # predicting probability of delay with hmm
-        trip_sq_df, hmm_prediction = hmm_model.predict(input)
-        stop_ids = trip_sq_df[['stop_id']]
-        display_route(stop_ids)
-        st.write(hmm_prediction)
+        try:
+            # predicting probability of delay with lstm
+            trip_sq_df, prediction = lstm_probability_model.predict(input)
+            stop_ids = trip_sq_df[['stop_id']]
+            display_route(stop_ids)
+            st.write(prediction)
+        
+            # predicting probability of delay with hmm
+            trip_sq_df, hmm_prediction = hmm_model.predict(input)
+            st.write(hmm_prediction)
+        except IndexError as exc:
+            st.error("We don't have enough knowledge to accurately predict the delay of this route yet!")
     
 if st.button("Predict Delay Duration", type="primary"):
     input = [route, arr_stop, dest_stop, selected_datetime]
