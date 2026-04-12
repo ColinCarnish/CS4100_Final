@@ -8,10 +8,10 @@ from sklearn.linear_model import LogisticRegression
 DATA_DIR = 'Downloads'
 
 # Features the HMM observes
-HMM_FEATURES = ['ARR', 'DEP', 'PRA', 'PRD', 'PRA_2', 'PRD_2']
+HMM_FEATURES = ['ARR', 'DEP']
  
-# Additional features for the classifier
-EXTRA_FEATURES = ['hour', 'day_of_week_num', 'month_num', 'prev_delayed', 'prev_delayed_2']
+# Additional features for the classifier (on top of HMM posteriors)
+EXTRA_FEATURES = ['hour', 'day_of_week_num', 'month_num']
  
  
 def load_split(filepath):
@@ -414,7 +414,8 @@ class ReadyHMM:
         hmm_path='src/models/model_storage/hmm_trained.pkl',
         clf_path='src/models/model_storage/hmm_classifier.pkl',
         scaler_path='src/models/model_storage/hmm_scaler.pkl',
-        data_path='src/models/model_storage/train_df.csv',
+        lookup_path='src/models/model_storage/hmm_delay_lookup.pkl',
+        trips_path='src/models/model_storage/hmm_trips.csv',
     ):
         # Load models
         self.hmm = MultivariateGaussianHMM(n_states=3, n_features=len(HMM_FEATURES))
@@ -424,20 +425,17 @@ class ReadyHMM:
         with open(scaler_path, 'rb') as f:
             self.scaler = pickle.load(f)
  
-        # Load training data for historical delay lookup and trip routing
-        self.df = pd.read_csv(data_path, dtype={'trip_id': str})
-        self.df['stop_sequence'] = pd.to_numeric(self.df['stop_sequence'], errors='coerce')
-        self.df['arrival_time_sec_x'] = pd.to_numeric(
-            self.df.get('arrival_time_sec_x', self.df.get('arrival_time_sec', pd.Series())),
-            errors='coerce'
-        )
-        self.df = self.df.dropna(subset=['trip_id', 'stop_name', 'stop_sequence'])
+        # Load precomputed delay lookup (small pickle, ~few KB)
+        with open(lookup_path, 'rb') as f:
+            self.delay_lookup = pickle.load(f)
  
-        # Build historical delay lookup
-        arr_df = self.df[self.df['event_type'] == 'ARR'] if 'event_type' in self.df.columns else self.df
-        self.delay_lookup = arr_df.groupby(
-            ['route_id', 'stop_name', 'hour', 'day_of_week_num']
-        )['delay_sec'].mean().to_dict()
+        # Load trip routing table (small CSV with just route/trip/stop/time)
+        self.df = pd.read_csv(trips_path, dtype={'trip_id': str})
+        self.df['stop_sequence'] = pd.to_numeric(self.df['stop_sequence'], errors='coerce')
+        # Handle arrival time column name
+        time_col = 'arrival_time_sec_x' if 'arrival_time_sec_x' in self.df.columns else 'arrival_time_sec'
+        self.df['arrival_time'] = pd.to_numeric(self.df[time_col], errors='coerce')
+        self.df = self.df.dropna(subset=['trip_id', 'stop_name', 'stop_sequence'])
  
     def time_to_seconds(self, dt):
         return dt.hour * 3600 + dt.minute * 60 + dt.second
@@ -462,9 +460,7 @@ class ReadyHMM:
             origin_row = trip[trip['stop_name'] == origin_stop]
             if origin_row.empty:
                 continue
-            # Try both possible column names for arrival time
-            time_col = 'arrival_time_sec_x' if 'arrival_time_sec_x' in origin_row.columns else 'arrival_time_sec'
-            origin_time = float(origin_row[time_col].values[0])
+            origin_time = float(origin_row['arrival_time'].values[0])
             if origin_time >= current_time_sec:
                 candidates.append((trip_id, origin_time))
         if not candidates:
@@ -504,15 +500,9 @@ class ReadyHMM:
  
         df['ARR'] = estimated_delays
         df['DEP'] = estimated_delays
-        df['PRA'] = pd.Series(estimated_delays).shift(1).fillna(0).values
-        df['PRD'] = pd.Series(estimated_delays).shift(1).fillna(0).values
-        df['PRA_2'] = pd.Series(estimated_delays).shift(2).fillna(0).values
-        df['PRD_2'] = pd.Series(estimated_delays).shift(2).fillna(0).values
         df['hour'] = hour
         df['day_of_week_num'] = dow
         df['month_num'] = month
-        df['prev_delayed'] = (df['PRA'] > 60).astype(int)
-        df['prev_delayed_2'] = (df['PRA_2'] > 60).astype(int)
  
         # Run HMM + classifier
         obs_scaled = self.scaler.transform(df[HMM_FEATURES].fillna(0).values)
