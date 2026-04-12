@@ -13,6 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.models.forest.forest import ReadyForest
 from src.models.lstm import ReadyLSTM
 from src.models.hmm_model import ReadyHMM
+from src.models.GBM import ReadyGBM
 
 
 # cache the model so it is not constantly reloading it every time
