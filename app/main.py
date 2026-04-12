@@ -29,11 +29,16 @@ def load_forest_model():
 def load_hmm_model():
     return ReadyHMM()
 
+@st.cache_resource
+def load_GBM_model():
+    return ReadyGBM()
+
 map_container = st.empty()
 
 lstm_probability_model = load_lstm_model()
 forest_duration_model = load_forest_model()
 hmm_model = load_hmm_model()
+GBM_model = load_GBM_model()
 with open('Datasets/stops_on_route.json', "r") as f:
     stops_on_route_dict = json.load(f)
 stops_info_df = pd.read_csv("Datasets/stops.txt")
