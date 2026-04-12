@@ -1,4 +1,5 @@
 import zipfile
+import pickle
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -6,21 +7,27 @@ import matplotlib.pyplot as plt
 
 matplotlib.use("Agg")
 
-# decision node tree
+# data container that holds the following:
+# which feature to split on
+# value to split at
+# left child node
+# right child node
+# leaf prediction
 class DecisionTreeNode:
 
     def __init__(self):
-        self.feature_index = None  # which feature to split on
-        self.threshold = None  # value to split at
-        self.left = None  # left child node  
-        self.right = None  # right child node 
-        self.value = None  # leaf prediction 
+        self.feature_index = None
+        self.threshold = None
+        self.left = None
+        self.right = None
+        self.value = None
 
+    # checks for type
     def is_leaf(self):
         return self.value is not None
 
 
-# regression tree for predicting
+# building regression tree for predictions
 class DecisionTree:
 
     def __init__(self, max_depth=4, min_samples_leaf=20):
@@ -28,14 +35,16 @@ class DecisionTree:
         self.min_samples_leaf = min_samples_leaf
         self.root = None
 
-    # building tree
+    # entry point
     def fit(self, X, y):
         self.root = self._build(X, y, depth=0)
 
     def _build(self, X, y, depth):
         node = DecisionTreeNode()
 
-        # stop conditions
+        # stop conditions:
+        # not enough data to split
+        # all values are nearly identical
         if (depth >= self.max_depth
                 or len(y) < 2 * self.min_samples_leaf
                 or np.std(y) < 1e-6):
@@ -101,7 +110,6 @@ class DecisionTree:
 
         return best_feature, best_threshold
 
-    # prediction
     def predict(self, X):
         return np.array([self._traverse(row, self.root) for row in X])
 
@@ -167,15 +175,36 @@ class GradientBoostingRegressor:
         return y_pred
 
 
-# loading data
+# PICKLE FUNCTIONS
+
+def save_model(model, feature_names, artifact_path):
+    artifact = {
+        "model": model,  # the trained GradientBoostingRegressor
+        "feature_names": feature_names,  # feature list in training order
+        "target_name": "delay_sec",  # what the model predicts
+    }
+    with open(artifact_path, "wb") as f:
+        pickle.dump(artifact, f)
+    print(f"  Model saved → {artifact_path}")
+
+
+def load_model(artifact_path):
+    with open(artifact_path, "rb") as f:
+        artifact = pickle.load(f)
+    print(f"  Model loaded ← {artifact_path}")
+    return artifact["model"], artifact["feature_names"], artifact["target_name"]
+
+
+# load data
 print("=" * 55)
-print("  MBTA Delay Model — Gradient Boosting")
+print("  MBTA Gradient Boosting Delay Model ")
 print("=" * 55)
 
 print("\nLoading data...")
 
 ZIP_PATH = r"C:\Users\ryuli\Downloads\final_data.csv.zip"
 CSV_NAME = "final_data.csv"
+ARTIFACT_PATH = r"C:\Users\ryuli\Downloads\gbm_delay_model.pkl"
 
 with zipfile.ZipFile(ZIP_PATH) as z:
     with z.open(CSV_NAME) as f:
@@ -205,7 +234,7 @@ arr["is_weekend"] = (arr["dow"] >= 5).astype(int)
 arr = arr.sort_values(["trip_id", "stop_sequence"])
 arr["lag_delay_1"] = arr.groupby("trip_id")["delay_sec"].shift(1)
 arr["lag_delay_2"] = arr.groupby("trip_id")["delay_sec"].shift(2)
-arr["cum_delay"]   = arr.groupby("trip_id")["delay_sec"].cumsum().shift(1)
+arr["cum_delay"] = arr.groupby("trip_id")["delay_sec"].cumsum().shift(1)
 
 # normalised stop position within trip (0 = first stop, 1 = last)
 arr["stop_seq_norm"] = arr.groupby("trip_id")["stop_sequence"].transform(
@@ -217,17 +246,17 @@ arr["stop_enc"] = arr["stop_name"].astype("category").cat.codes
 
 # build feature list — direction_id added only if present in dataset
 FEATURES = [
-    "route_enc",        # line (Red/Orange/Blue)
-    "stop_sequence",    # position along route
-    "stop_seq_norm",    # normalised position
-    "stop_enc",         # which stop
-    "hour",             # hour of day
-    "dow",              # day of week
-    "is_weekend",       # weekend flag
-    "is_peak",          # peak hour flag
-    "lag_delay_1",      # delay at previous stop
-    "lag_delay_2",      # delay two stops back
-    "cum_delay",        # cumulative delay so far in trip
+    "route_enc",  # line (Red/Orange/Blue)
+    "stop_sequence",  # position along route
+    "stop_seq_norm",  # normalised position
+    "stop_enc",  # which stop
+    "hour",  # hour of day
+    "dow",  # day of week
+    "is_weekend",  # weekend flag
+    "is_peak",  # peak hour flag
+    "lag_delay_1",  # delay at previous stop
+    "lag_delay_2",  # delay two stops back
+    "cum_delay",  # cumulative delay so far in trip
 ]
 
 if "direction_id" in arr.columns:
@@ -244,7 +273,7 @@ p99 = model_df[TARGET].quantile(0.99)
 p01 = model_df[TARGET].quantile(0.01)
 model_df = model_df[
     (model_df[TARGET] >= p01) & (model_df[TARGET] <= p99)
-].copy()
+    ].copy()
 
 print(f"  Model rows after cleaning : {len(model_df):,}")
 
@@ -271,7 +300,7 @@ X_test, y_test = X_all[test_idx], y_all[test_idx]
 
 print(f"  Train : {len(X_train):,}  |  Test : {len(X_test):,}")
 
-# training model
+# model training
 print("\nTraining Gradient Boosting...")
 
 model = GradientBoostingRegressor(
@@ -283,16 +312,20 @@ model = GradientBoostingRegressor(
 
 model.fit(X_train, y_train, X_val=X_test, y_val=y_test)
 
-# evaluate
+# save model
+print("\nSaving model...")
+save_model(model, FEATURES, ARTIFACT_PATH)
+
+# evaluate the model
 print("\nEvaluating...")
 
 y_pred = model.predict(X_test)
 
-mae  = np.mean(np.abs(y_test - y_pred))
+mae = np.mean(np.abs(y_test - y_pred))
 rmse = np.sqrt(np.mean((y_test - y_pred) ** 2))
 ss_res = np.sum((y_test - y_pred) ** 2)
 ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
-r2   = 1 - ss_res / ss_tot
+r2 = 1 - ss_res / ss_tot
 
 print(f"\n  MAE  : {mae:.1f}s  ({mae / 60:.2f} min)")
 print(f"  RMSE : {rmse:.1f}s  ({rmse / 60:.2f} min)")
@@ -342,26 +375,30 @@ plt.tight_layout()
 plt.savefig(r"C:\Users\ryuli\Downloads\mbta_results.png", dpi=150, bbox_inches="tight")
 print("  Plot saved → mbta_results.png")
 
-# example prediction 
-# if direction_id was added, insert its value at position 1
-print("\nExample: Red Line, peak hour, 3-min lag delay")
+# EXAMPLE: 
+print("\nLoading model from pickle and predicting...")
+loaded_model, loaded_features, loaded_target = load_model(ARTIFACT_PATH)
+
+print(f"  Loaded target  : {loaded_target}")
+print(f"  Loaded features: {loaded_features}")
+
 example_values = [
-    0,      # route_enc     (Red=0)
-    100,    # stop_sequence
-    0.5,    # stop_seq_norm
-    10,     # stop_enc
-    8,      # hour
-    1,      # dow           (Tuesday=1)
-    0,      # is_weekend
-    1,      # is_peak
-    180,    # lag_delay_1   (3 min delay at previous stop)
-    90,     # lag_delay_2
-    270,    # cum_delay
+    0,  # route_enc     (Red=0)
+    100,  # stop_sequence
+    0.5,  # stop_seq_norm
+    10,  # stop_enc
+    8,  # hour
+    1,  # dow           (Tuesday=1)
+    0,  # is_weekend
+    1,  # is_peak
+    180,  # lag_delay_1   (3 min delay at previous stop)
+    90,  # lag_delay_2
+    270,  # cum_delay
 ]
 
-if "direction_id" in FEATURES:
-    example_values.insert(1, 1)  
+if "direction_id" in loaded_features:
+    example_values.insert(1, 1)
 
 example = np.array([example_values])
-pred = model.predict(example)[0]
+pred = loaded_model.predict(example)[0]
 print(f"  Predicted delay : {pred:.0f}s  ({pred / 60:.1f} min)")
