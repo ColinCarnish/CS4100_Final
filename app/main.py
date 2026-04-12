@@ -12,6 +12,7 @@ import streamlit as st
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.models.forest.forest import ReadyForest
 from src.models.lstm import ReadyLSTM
+from src.models.hmm_model import ReadyHMM
 
 
 # cache the model so it is not constantly reloading it every time
@@ -23,10 +24,15 @@ def load_lstm_model():
 def load_forest_model():
     return ReadyForest()
 
+@st.cache_resource
+def load_hmm_model():
+    return ReadyHMM()
+
 map_container = st.empty()
 
 lstm_probability_model = load_lstm_model()
 forest_duration_model = load_forest_model()
+hmm_model = load_hmm_model()
 with open('Datasets/stops_on_route.json', "r") as f:
     stops_on_route_dict = json.load(f)
 stops_info_df = pd.read_csv("Datasets/stops.txt")
@@ -107,7 +113,11 @@ if st.button("Predict Delay Likelihood", type="primary"):
         display_route(stop_ids)
         st.write(prediction)
     
-    # predicting probability of delay with hmm
+        # predicting probability of delay with hmm
+        trip_sq_df, hmm_prediction = hmm_model.predict(input)
+        stop_ids = trip_sq_df[['stop_id']]
+        display_route(stop_ids)
+        st.write(hmm_prediction)
     
 if st.button("Predict Delay Duration", type="primary"):
     input = [route, arr_stop, dest_stop, selected_datetime]
