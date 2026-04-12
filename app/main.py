@@ -6,6 +6,8 @@ import sys
 import os
 import pydeck as pdk
 
+# TO RUN: streamlit run main.py
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.models.lstm import ReadyLSTM
 
