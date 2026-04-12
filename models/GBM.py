@@ -20,7 +20,7 @@ class DecisionTreeNode:
         return self.value is not None
 
 
-# regression tree for predicting 
+# regression tree for predicting
 class DecisionTree:
 
     def __init__(self, max_depth=4, min_samples_leaf=20):
@@ -167,86 +167,85 @@ class GradientBoostingRegressor:
         return y_pred
 
 
-# loading features
+# loading data
 print("=" * 55)
 print("  MBTA Delay Model — Gradient Boosting")
 print("=" * 55)
 
 print("\nLoading data...")
 
-ZIP_PATH = r"C:\Users\ryuli\Downloads\2022-06_HREvents.zip"
-CSV_NAME = "2022-06_HREvents.csv"
-STOPS_PATH = r"C:\Users\ryuli\Downloads\stops.txt"
+ZIP_PATH = r"C:\Users\ryuli\Downloads\final_data.csv.zip"
+CSV_NAME = "final_data.csv"
 
 with zipfile.ZipFile(ZIP_PATH) as z:
     with z.open(CSV_NAME) as f:
-        df = pd.read_csv(f)
-
-stops = pd.read_csv(STOPS_PATH, usecols=[
-    "stop_id", "stop_lat", "stop_lon", "municipality"
-])
-stops["stop_id"] = stops["stop_id"].astype(str)
+        df = pd.read_csv(f, low_memory=False)
 
 print(f"  Events : {len(df):,} rows")
 
-# filter arrivals
+# filter arrivals only
 arr = df[df["event_type"] == "ARR"].copy()
+print(f"  ARR rows : {len(arr):,}")
 
-arr.sort_values(["route_id", "stop_id", "direction_id", "event_time"], inplace=True)
-arr["stop_id"] = arr["stop_id"].astype(str)
-arr["prev_train_time"] = arr.groupby(
-    ["route_id", "stop_id", "direction_id"]
-)["event_time"].shift(1)
-arr["headway_sec"] = arr["event_time"] - arr["prev_train_time"]
-arr = arr[(arr["headway_sec"] > 60) & (arr["headway_sec"] < 3600)].copy()
+# encode route as integer (dataset already has one-hot cols but we use label enc for simplicity)
+arr["route_enc"] = arr["route_id"].map({"Red": 0, "Orange": 1, "Blue": 2}).fillna(-1)
 
-# time features
-arr["hour"] = (arr["event_time_sec"] // 3600) % 24
-arr["dow"] = pd.to_datetime(arr["service_date"]).dt.dayofweek
+# encode day of week as integer
+dow_map = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+           "Friday": 4, "Saturday": 5, "Sunday": 6}
+arr["dow"] = arr["day_of_week"].map(dow_map)
+
+# peak hour flag
 arr["is_peak"] = arr["hour"].isin([7, 8, 9, 16, 17, 18, 19]).astype(int)
+
+# weekend flag
 arr["is_weekend"] = (arr["dow"] >= 5).astype(int)
 
-# target
-arr["scheduled_headway"] = arr.groupby(
-    ["route_id", "stop_id", "direction_id", "hour"]
-)["headway_sec"].transform("median")
-arr["headway_delay_sec"] = arr["headway_sec"] - arr["scheduled_headway"]
+# lag features: delay at previous stop in the same trip
+arr = arr.sort_values(["trip_id", "stop_sequence"])
+arr["lag_delay_1"] = arr.groupby("trip_id")["delay_sec"].shift(1)
+arr["lag_delay_2"] = arr.groupby("trip_id")["delay_sec"].shift(2)
+arr["cum_delay"]   = arr.groupby("trip_id")["delay_sec"].cumsum().shift(1)
 
-# lag features
-arr.sort_values(["trip_id", "stop_sequence"], inplace=True)
-arr["lag_delay_1"] = arr.groupby("trip_id")["headway_delay_sec"].shift(1)
-arr["lag_delay_2"] = arr.groupby("trip_id")["headway_delay_sec"].shift(2)
-arr["cum_delay"] = arr.groupby("trip_id")["headway_delay_sec"].cumsum().shift(1)
+# normalised stop position within trip (0 = first stop, 1 = last)
 arr["stop_seq_norm"] = arr.groupby("trip_id")["stop_sequence"].transform(
     lambda x: (x - x.min()) / (x.max() - x.min() + 1e-6)
 )
 
-# merge stops
-arr = arr.merge(stops, on="stop_id", how="left")
-
-# encode categories as integers
-arr["route_enc"] = arr["route_id"].map({"Red": 0, "Orange": 1, "Blue": 2}).fillna(-1)
-arr["muni_enc"] = arr["municipality"].astype("category").cat.codes
+# encode stop name as integer category
+arr["stop_enc"] = arr["stop_name"].astype("category").cat.codes
 
 FEATURES = [
-    "route_enc", "direction_id", "stop_sequence", "stop_seq_norm",
-    "stop_lat", "stop_lon", "muni_enc",
-    "hour", "dow", "is_weekend", "is_peak",
-    "headway_sec", "scheduled_headway",
-    "lag_delay_1", "lag_delay_2", "cum_delay",
+    "route_enc",        # line (Red/Orange/Blue)
+    "direction_id" if "direction_id" in arr.columns else "route_enc",  # fallback
+    "stop_sequence",    # position along route
+    "stop_seq_norm",    # normalised position
+    "stop_enc",         # which stop
+    "hour",             # hour of day
+    "dow",              # day of week
+    "is_weekend",       # weekend flag
+    "is_peak",          # peak hour flag
+    "lag_delay_1",      # delay at previous stop
+    "lag_delay_2",      # delay two stops back
+    "cum_delay",        # cumulative delay so far in trip
 ]
-TARGET = "headway_delay_sec"
+
+# use direction_id if available, otherwise drop it
+if "direction_id" not in arr.columns:
+    FEATURES = [f for f in FEATURES if f != "direction_id"]
+
+TARGET = "delay_sec"
 
 model_df = arr[FEATURES + [TARGET]].dropna(subset=[TARGET, "lag_delay_1"])
 
-# cap outliers
+# cap outliers at 1st and 99th percentile
 p99 = model_df[TARGET].quantile(0.99)
 p01 = model_df[TARGET].quantile(0.01)
 model_df = model_df[
     (model_df[TARGET] >= p01) & (model_df[TARGET] <= p99)
-    ].copy()
+].copy()
 
-print(f"  Model rows : {len(model_df):,}")
+print(f"  Model rows after cleaning : {len(model_df):,}")
 
 SAMPLE = 30_000
 model_df = model_df.sample(SAMPLE, random_state=42)
@@ -275,7 +274,7 @@ print(f"  Train : {len(X_train):,}  |  Test : {len(X_test):,}")
 print("\nTraining Gradient Boosting...")
 
 model = GradientBoostingRegressor(
-    n_estimators=50,  # 50 trees (kept low so it runs fast)
+    n_estimators=50,
     learning_rate=0.1,
     max_depth=4,
     min_samples_leaf=20,
@@ -284,22 +283,21 @@ model = GradientBoostingRegressor(
 model.fit(X_train, y_train, X_val=X_test, y_val=y_test)
 
 # evaluate
-
 print("\nEvaluating...")
 
 y_pred = model.predict(X_test)
 
-mae = np.mean(np.abs(y_test - y_pred))
+mae  = np.mean(np.abs(y_test - y_pred))
 rmse = np.sqrt(np.mean((y_test - y_pred) ** 2))
 ss_res = np.sum((y_test - y_pred) ** 2)
 ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
-r2 = 1 - ss_res / ss_tot
+r2   = 1 - ss_res / ss_tot
 
 print(f"\n  MAE  : {mae:.1f}s  ({mae / 60:.2f} min)")
 print(f"  RMSE : {rmse:.1f}s  ({rmse / 60:.2f} min)")
 print(f"  R²   : {r2:.4f}")
 
-
+# feature importance
 print("\nCalculating feature importances...")
 
 base_mae = np.mean(np.abs(y_test - y_pred))
@@ -307,10 +305,10 @@ importances = []
 
 for i, feat in enumerate(FEATURES):
     X_shuffled = X_test.copy()
-    np.random.shuffle(X_shuffled[:, i])  # break this feature's signal
+    np.random.shuffle(X_shuffled[:, i])
     shuffled_pred = model.predict(X_shuffled)
     shuffled_mae = np.mean(np.abs(y_test - shuffled_pred))
-    importances.append(shuffled_mae - base_mae)  # how much worse did we get?
+    importances.append(shuffled_mae - base_mae)
 
 importances = np.array(importances)
 imp_series = pd.Series(importances, index=FEATURES).sort_values()
@@ -323,7 +321,6 @@ fig.suptitle(
     fontsize=12
 )
 
-# feature importance
 colors = ["tomato" if v > 0 else "lightgray" for v in imp_series.values]
 axes[0].barh(imp_series.index, imp_series.values, color=colors)
 axes[0].set_xlabel("Increase in MAE when feature is shuffled (seconds)")
@@ -331,7 +328,6 @@ axes[0].set_title("Feature Importance (permutation)")
 axes[0].axvline(0, color="black", linewidth=0.8)
 axes[0].grid(axis="x", alpha=0.3)
 
-# actual vs predicted
 axes[1].scatter(y_test, y_pred, alpha=0.2, s=8, color="steelblue")
 lims = [min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())]
 axes[1].plot(lims, lims, "r--", linewidth=1.2, label="Perfect prediction")
@@ -346,25 +342,19 @@ plt.savefig(r"C:\Users\ryuli\Downloads\mbta_results.png", dpi=150, bbox_inches="
 print("  Plot saved → mbta_results.png")
 
 # example prediction
-
 print("\nExample: Red Line, peak hour, 3-min lag delay")
 example = np.array([[
-    0,  # route_enc   (Red=0)
-    1,  # direction_id
-    100,  # stop_sequence
-    0.5,  # stop_seq_norm
-    42.36,  # stop_lat
-    -71.06,  # stop_lon
-    5,  # muni_enc    (Boston)
-    8,  # hour
-    1,  # dow         (Tuesday)
-    0,  # is_weekend
-    1,  # is_peak
-    540,  # headway_sec
-    360,  # scheduled_headway
-    180,  # lag_delay_1
-    90,  # lag_delay_2
-    270,  # cum_delay
+    0,      # route_enc     (Red=0)
+    100,    # stop_sequence
+    0.5,    # stop_seq_norm
+    10,     # stop_enc      (arbitrary stop)
+    8,      # hour
+    1,      # dow           (Tuesday)
+    0,      # is_weekend
+    1,      # is_peak
+    180,    # lag_delay_1   (3 min delay at previous stop)
+    90,     # lag_delay_2
+    270,    # cum_delay
 ]])
 
 pred = model.predict(example)[0]
