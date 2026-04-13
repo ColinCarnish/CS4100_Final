@@ -1,5 +1,6 @@
 import zipfile
 import pickle
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -183,12 +184,15 @@ def save_model(model, feature_names, artifact_path):
         "feature_names": feature_names,  # feature list in training order
         "target_name": "delay_sec",  # what the model predicts
     }
+    artifact_path = Path(artifact_path)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
     with open(artifact_path, "wb") as f:
         pickle.dump(artifact, f)
     print(f"  Model saved → {artifact_path}")
 
 
 def load_model(artifact_path):
+    artifact_path = Path(artifact_path)
     with open(artifact_path, "rb") as f:
         artifact = pickle.load(f)
     print(f"  Model loaded ← {artifact_path}")
@@ -202,13 +206,18 @@ print("=" * 55)
 
 print("\nLoading data...")
 
-ZIP_PATH = r"C:\Users\ryuli\Downloads\final_data.csv.zip"
-CSV_NAME = "final_data.csv"
-ARTIFACT_PATH = r"C:\Users\ryuli\Downloads\gbm_delay_model.pkl"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATASET_ZIP_PATH = PROJECT_ROOT / "Datasets" / "final_data.csv.zip"
+DATASET_CSV_PATH = PROJECT_ROOT / "Datasets" / "final_data.csv"
+ARTIFACT_PATH = PROJECT_ROOT / "src" / "models" / "model_storage" / "gbm_delay_model.pkl"
+PLOT_PATH = PROJECT_ROOT / "src" / "visualizations" / "mbta_results.png"
 
-with zipfile.ZipFile(ZIP_PATH) as z:
-    with z.open(CSV_NAME) as f:
-        df = pd.read_csv(f, low_memory=False)
+if DATASET_ZIP_PATH.exists():
+    with zipfile.ZipFile(DATASET_ZIP_PATH) as z:
+        with z.open(DATASET_CSV_PATH.name) as f:
+            df = pd.read_csv(f, low_memory=False)
+else:
+    df = pd.read_csv(DATASET_CSV_PATH, low_memory=False)
 
 print(f"  Events : {len(df):,} rows")
 
@@ -372,8 +381,9 @@ axes[1].legend()
 axes[1].grid(alpha=0.3)
 
 plt.tight_layout()
-plt.savefig(r"C:\Users\ryuli\Downloads\mbta_results.png", dpi=150, bbox_inches="tight")
-print("  Plot saved → mbta_results.png")
+PLOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+plt.savefig(PLOT_PATH, dpi=150, bbox_inches="tight")
+print(f"  Plot saved → {PLOT_PATH}")
 
 # EXAMPLE:
 print("\nLoading model from pickle and predicting...")
@@ -407,9 +417,11 @@ print(f"  Predicted delay : {pred:.0f}s  ({pred / 60:.1f} min)")
 class ReadyGBM:
     def __init__(
             self,
-            artifact_path: str = "src/models/model_storage/gbm_delay_model.pkl",
-            data_path: str = "Datasets/final_data.csv",
+            artifact_path=PROJECT_ROOT / "src" / "models" / "model_storage" / "gbm_delay_model.pkl",
+            data_path=PROJECT_ROOT / "Datasets" / "final_data.csv",
     ) -> None:
+        artifact_path = Path(artifact_path)
+        data_path = Path(data_path)
         # load the saved model and feature list from pickle
         model, feature_names, target_name = load_model(artifact_path)
         self.model = model
