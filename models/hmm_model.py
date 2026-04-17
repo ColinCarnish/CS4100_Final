@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+# AI DISCLOSURE: Claude Opus 4.6 was used to help implement and debug this code
 
 # Discretizer — converts continuous delay values to discrete HMM symbols
 
@@ -315,7 +316,7 @@ def main():
     print(f"Loaded {len(df)} events | {df['service_date'].nunique()} days | "
           f"Routes: {sorted(df['route_id'].unique())}")
 
-    # Clip outliers: cap delay_min to [-10, 60] minutes.
+    # Clip outliers: cap delay_min to [-10, 60] minutes
     clip_low, clip_high = -10, 60
     n_before = len(df)
     df = df[(df['delay_min'] >= clip_low) & (df['delay_min'] <= clip_high)].copy()
