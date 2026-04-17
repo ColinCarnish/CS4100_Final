@@ -5,6 +5,8 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 
+# AI DISCLOSURE: Claude Opus 4.6 was used to help implement and debug this code
+
 DATA_DIR = 'Downloads'
 
 # Features the HMM observes
@@ -425,11 +427,11 @@ class ReadyHMM:
         with open(scaler_path, 'rb') as f:
             self.scaler = pickle.load(f)
  
-        # Load precomputed delay lookup (small pickle, ~few KB)
+        # Load precomputed delay lookup
         with open(lookup_path, 'rb') as f:
             self.delay_lookup = pickle.load(f)
  
-        # Load trip routing table (small CSV with just route/trip/stop/time)
+        # Load trip routing table
         self.df = pd.read_csv(trips_path, dtype={'trip_id': str})
         self.df['stop_sequence'] = pd.to_numeric(self.df['stop_sequence'], errors='coerce')
         # Handle arrival time column name
