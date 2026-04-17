@@ -11,9 +11,9 @@ import streamlit as st
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.models.forest.forest import ReadyForest
-from src.models.lstm import ReadyLSTM
-from src.models.hmm_model import ReadyHMM
 from src.models.GBM import ReadyGBM
+from src.models.hmm_model import ReadyHMM
+from src.models.lstm import ReadyLSTM
 
 
 # cache the model so it is not constantly reloading it every time
@@ -134,14 +134,8 @@ if st.button("Predict Delay Duration", type="primary"):
             stop_ids = trip_sq_df[['stop_id']]
             display_route(stop_ids)
             st.write(prediction)
-        except ValueError as exc:
-            st.error(str(exc))
 
-if st.button("Predict Delay Duration (GBM)", type="primary"):
-    input = [route, arr_stop, dest_stop, selected_datetime]
-    with st.spinner("Predicting delay duration..."):
-        try:
-            trip_sq_df, prediction = gbm_duration_model.predict(input)
+            trip_sq_df, prediction = GBM_model.predict(input)
             stop_ids = trip_sq_df[['stop_id']]
             display_route(stop_ids)
             st.write(prediction)
