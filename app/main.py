@@ -125,6 +125,8 @@ if st.button("Predict Delay Likelihood", type="primary"):
             st.write(hmm_prediction)
         except IndexError as exc:
             st.error("We don't have enough knowledge to accurately predict the delay of this route yet!")
+        except ValueError as exc:
+            st.error("We don't have enough knowledge to accurately predict the delay of this route yet!")
     
 if st.button("Predict Delay Duration", type="primary"):
     input = [route, arr_stop, dest_stop, selected_datetime]
