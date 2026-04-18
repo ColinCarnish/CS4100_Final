@@ -94,11 +94,3 @@ streamlit run app/main.py
 ```
 
 ---
-
-# Libraries Used
-
-Core libraries:
-```bash
-pip install -r requirements.txt
-```
----
