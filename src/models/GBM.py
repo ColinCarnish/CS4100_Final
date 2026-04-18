@@ -176,7 +176,7 @@ class GradientBoostingRegressor:
         return y_pred
 
 
-# PICKLE FUNCTIONS
+# pickle
 
 def save_model(model, feature_names, artifact_path):
     artifact = {
