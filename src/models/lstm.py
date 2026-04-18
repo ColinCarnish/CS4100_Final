@@ -1,29 +1,3 @@
-# LSTM
-# improved version of RNN to capture long term dependencies in sequential data 
-# good for time series forecasting
-# LSTM architecture: involves what goes/stays in the memory cell
-    # Input Gate: controls what information is added to the memory cell
-        # equation: sigmoid(W_i * [h_t-1, x_t] + b_i) # information is regulated using the sigmoid function and filter the values to be remembered
-        # C_t = tanh(W_c * [h_t-1, x_t] + b_c) # a vector is created using tanh function that gives an output from -1 to +1 which contains all the possible values from (??? this may mean each element) prev hidden state to cur input
-        # these are multiplied tg to get regulated inputs * vector values to add useful information to the memory cell
-        # multiply f_t (forget gate output) by the previous C_t to filter out the information we decided to ignore previously (and) and add that with the new multiplication result (or)
-    # Forget Gate: determines what information is removed from the memory cell
-        # equation: sigmoid(W_f * [h_t-1, x_t] + b_f) 
-        # W_f = weight matrix for forget (f) gate
-        # h_t-1 = previous hidden state
-        # x_t = current input state
-        # b_f = bias factor for bias (b) gate
-    # Output Gate: decides what part of the current memory cell state should be sent as the hidden state for a given time step
-        # equation: sigmoid(W_o * [h_t-1, x_t] + b_o) # which information from the current cell state will be output
-        # h_t = o_t * tanh(C_t) # current cell state is passed to a tanh function that gives an output from -1 to +1 and multiplied by the sigmoid equation output --> hidden state h_t
-    # Output Gate: controls what memory information is outputted from the memory cell
-# the outputted C_t (current cell state) from the forget and input gate and h_t from the output gate are used to generate the next output of the network!
-# This allows LSTM networks to selectively retain or discard information as it flows through the network to learn long-term dependencies
-# hidden state is treated as its "short term memory"
-# the memory is updated using the current input, the previous hidden state and the current state of the memory cell.
-    # memory = current input + prev hidden state (short term memory) + cur state memory cell
-    # h_t
-    
 from sklearn.preprocessing import StandardScaler
 import torch
 import torch.nn as nn
@@ -37,6 +11,9 @@ from sklearn.metrics import f1_score
 from sklearn.metrics import (
     confusion_matrix
 )
+from sklearn.utils import resample
+import torch.nn.functional as F
+from sklearn.metrics import precision_recall_curve
 
 
 
@@ -50,7 +27,6 @@ class CustomLSTM(nn.Module):
     
     def forward(self, x):
         batch_size, seq_len, input_size = x.size()
-        # device = x.device #???
         
         hidden_state = torch.zeros(batch_size, self.hidden_size)
         cur_mem_state = torch.zeros(batch_size, self.hidden_size)
@@ -89,14 +65,14 @@ class DelayPredictor(nn.Module):
     
     # predicting delay at each stop
     def forward(self, x):
-        outputs, _ = self.lstm(x) # (batch, seq_len, hidden_size)
+        outputs, _ = self.lstm(x) # dims (batch, seq len, hidden size)
         outputs = self.dropout(outputs)
-        predictions = torch.sigmoid(self.fc(outputs)) # (batch, seq_len, 1)
-        return predictions.squeeze(-1) # (batch, seq_len)
+        logits = self.fc(outputs)
+        return logits.squeeze(-1) # dims (batch, seq len)
     
     
  
-# TODO: initialize vars somewhere else
+
 day_map = {
     "Monday": 0,
     "Tuesday": 1,
@@ -107,10 +83,10 @@ day_map = {
     "Sunday": 6
 }  
 
-features = ['stop_sequence', 'PRA', 'PRD', 'PRA_2', 'PRD_2', 'day_of_week_num', 'month_num', 'hour', 'route_id_Blue', 'route_id_Red', 'route_id_Orange', 'travel_dur']
+features = ['stop_sequence', 'day_of_week_num', 'month_num', 'hour', 'route_id_Blue', 'route_id_Red', 'route_id_Orange', 'travel_dur']
 target = ['delayed']
-scale_cols = ['PRA', 'PRD', 'PRA_2', 'PRD_2', 'stop_sequence', 'hour', 'day_of_week_num', 'month_num', 'travel_dur']
-# scale the delay values so they are all centered around a specific point and are comparable without some delay values outweighing others (?)
+scale_cols = ['stop_sequence', 'hour', 'day_of_week_num', 'month_num', 'travel_dur']
+# scale the delay values so they are all centered around a specific point and are comparable without some delay values outweighing others
 scaler = StandardScaler()
  
 def preprocess_for_model():
@@ -157,7 +133,6 @@ def preprocess_for_model():
     # get the other columns not present in the pivot table
     other_cols = data.drop(columns=["arrival_time_sec", "departure_time_sec"]) \
                .drop_duplicates(subset=["trip_id", "stop_sequence"])
-    print("OTHER COLS:", other_cols)
 
     # merge those columns back into the df
     final_data = combined_data.merge(
@@ -165,10 +140,9 @@ def preprocess_for_model():
         on=["trip_id", "stop_sequence"],
         how="left"
     )
-    print("COLS:", final_data.columns)
 
     # add a column that contains a binary value (0 or 1) if there is a delay at the current stop, the prev stop, or the prev 2 stops for classification purposes
-    final_data["delayed"] = ((final_data["ARR"] > 60) | (final_data["DEP"] > 60)).astype(int)
+    final_data["delayed"] = ((final_data["ARR"] > final_data["PRD"]) | (final_data["DEP"] > final_data["PRA"])).astype(int)
     final_data["prev_delayed"] = ((final_data["PRA"] > 60) | (final_data["PRD"] > 60)).astype(int)
     final_data["prev_delayed_2"] = ((final_data["PRA_2"] > 60) | (final_data["PRD_2"] > 60)).astype(int)
 
@@ -186,22 +160,61 @@ def data_to_model(final_data):
     final_data = final_data.fillna(0)
     final_data = final_data.sort_values(["trip_id", "stop_sequence"])
     
-    # sort by time FIRST
+    # sort by time first
     final_data = final_data.sort_values("service_date")
     final_data.to_csv("help.csv")
-    # define splits
     
+    # define splits
     train_df = final_data[final_data["service_date"] < "2023-01-01"]
     val_df   = final_data[(final_data["service_date"] >= "2023-11-01") & 
                         (final_data["service_date"] < "2023-12-01")]
     test_df  = final_data[final_data["service_date"] >= "2023-12-01"]
+    
+    trip_labels = final_data.groupby("trip_id")["delayed"].max().reset_index()
+    
+    delayed_trips = trip_labels[trip_labels["delayed"] == 1]["trip_id"]
+    not_delayed_trips = trip_labels[trip_labels["delayed"] == 0]["trip_id"]
+    
+
+    # downsample majority class
+    min_size = min(len(delayed_trips), len(not_delayed_trips))
+
+    delayed_sample = resample(delayed_trips, replace=False, n_samples=min_size, random_state=42)
+    not_delayed_sample = resample(not_delayed_trips, replace=False, n_samples=min_size, random_state=42)
+
+    balanced_trips = pd.concat([delayed_sample, not_delayed_sample])
+    
+    # filter df
+    balanced_df = final_data[final_data["trip_id"].isin(balanced_trips)]
+    
+    trip_labels = balanced_df.groupby("trip_id")["delayed"].max().reset_index()
+    
+    trip_ids = trip_labels["trip_id"]
+    y = trip_labels["delayed"]
+    
+    train_ids, temp_ids = train_test_split(
+    trip_ids,
+    test_size=0.3,
+    stratify=y,
+    random_state=42
+    )
+
+    temp_labels = trip_labels[trip_labels["trip_id"].isin(temp_ids)]
+
+    val_ids, test_ids = train_test_split(
+        temp_ids,
+        test_size=0.5,
+        stratify=temp_labels["delayed"],
+        random_state=42
+    )
+    
+    train_df = balanced_df[balanced_df["trip_id"].isin(train_ids)]
+    val_df   = balanced_df[balanced_df["trip_id"].isin(val_ids)]
+    test_df  = balanced_df[balanced_df["trip_id"].isin(test_ids)]
+    
     train_df.to_csv("train_df.csv")
     val_df.to_csv("val_df.csv")
     test_df.to_csv("test_df.csv")
-    print("train delayed vals:", train_df["delayed"].value_counts())
-    print("val delayed vals:", val_df["delayed"].value_counts())
-    print("test delayed vals:", test_df["delayed"].value_counts())
-    print("LENGTHS:", len(train_df), len(val_df), len(test_df))
 
     # fit seperately for train, test, validation set
     train_df[scale_cols] = scaler.fit_transform(train_df[scale_cols])
@@ -238,11 +251,6 @@ def create_trip_seqs(df):
     y_padded = pad_sequence(y_seqs, batch_first=True, padding_value=0.0)  # Use 0 for padding
     mask = pad_sequence([torch.ones(len(seq)) for seq in y_seqs], batch_first=True)  # 1 = valid and 0 = padded
     y_padded = y_padded.squeeze(-1)
-
-
-    print("X shape:", X_padded.shape)
-    print("y shape:", y_padded.shape)
-    print("mask shape:", mask.shape)
     
     return X_padded, y_padded, mask
 
@@ -252,7 +260,7 @@ def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
     model = DelayPredictor(input_size, hidden_size)
 
     # good for binary classification
-    criterion = nn.BCEWithLogitsLoss(reduction='none')
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
 
     dataset = TensorDataset(X_train, y_train, mask_train)
@@ -260,25 +268,20 @@ def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
     count = 0
     prev_train_loss = 0
     epoch = 0
-    wait = 10
+    wait = 15
     train_losses = []
     val_losses = []
+    best_val_loss = float('inf')
     for epoch in range(1000):
         model.train()
         total_loss = 0
-        best_val_loss = float('inf')
 
         for X_batch, y_batch, mask_batch in loader:
             optimizer.zero_grad()
 
             outputs = model(X_batch)
 
-            bce_loss = criterion(outputs, y_batch)
-            # 3. create weights (based on TRUE labels)
-            weights = torch.where(y_batch == 0, 2.0, 1.0)
-            
-             # 4. apply weights
-            loss = (bce_loss * weights).mean()
+            loss = criterion(outputs, y_batch)
             loss = (loss * mask_batch)
             loss = loss.sum() / (mask_batch.sum() + 1e-8)
 
@@ -295,9 +298,8 @@ def train(X_train, y_train, mask_train, X_val, y_val, mask_val):
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_val_loss = val_loss
             epochs_no_improve = 0
-            torch.save(model.state_dict(), "src/models/model_storage/best_model.pt")
+            torch.save(model.state_dict(), "src/models/model_storage/best_model_2.pt")
         else:
             epochs_no_improve += 1
             
@@ -323,11 +325,6 @@ def evaluate_model(model, X, y, mask, criterion):
 def compute_metrics(outputs, y_true, mask, threshold=0.5):
     """
     Compute masked accuracy, precision, and recall for binary predictions.
-    
-    outputs: (batch, seq_len) raw probabilities from DelayPredictor
-    y_true: (batch, seq_len) ground truth 0/1
-    mask: (batch, seq_len) 0/1 mask indicating valid timesteps
-    threshold: probability cutoff to predict 1 (delayed)
     """
     
     # selects only valid time steps (filters out padding)
@@ -357,21 +354,6 @@ def compute_metrics(outputs, y_true, mask, threshold=0.5):
     
     f1_not_delayed = 2 * (precision_not_delayed * recall_not_delayed) / (precision_not_delayed + recall_not_delayed)
     
-    # for durations: simple mean squared errors
-    # for classifications: accuracy / precisions chart TP, FN, FP, TN
-    # penalize for how high or how low classification is 
-    # mse but values are 0 to 1 (maybe...)
-    
-    # return {
-    #     "accuracy": accuracy,
-    #     "precision_delayed": precision_delayed,
-    #     "recall_delayed": recall_delayed,
-    #     "f1_delayed": f1_delayed,
-    #     "precision_not_delayed": precision_not_delayed,
-    #     "recall_not_delayed": recall_not_delayed,
-    #     "f1_not_delayed": f1_not_delayed,
-    #     "confusion_matrix": (tn, fp, fn, tp)
-    # }
     return accuracy, precision_delayed, recall_delayed, f1_delayed, precision_not_delayed, recall_not_delayed, f1_not_delayed, (tn, fp, fn, tp)
     
 def visualize_training_progress(train_losses, val_losses):
@@ -396,10 +378,10 @@ def main(is_train = True):
         test(X_test, y_test, mask_test)
     
 def test(X_test, y_test, mask_test):
-    model = DelayPredictor(input_size=12, hidden_size=128)
+    model = DelayPredictor(input_size=8, hidden_size=128)
 
     # load weights
-    model.load_state_dict(torch.load("src/models/model_storage/best_model_weights_2.pt"))
+    model.load_state_dict(torch.load("src/models/model_storage/lstm_model.pt"))
 
     # eval mode
     model.eval()
@@ -408,37 +390,42 @@ def test(X_test, y_test, mask_test):
     with torch.no_grad():
         # send test data to the model
         outputs = model(X_test)  
-        # 0.7 yields the best 
-        for threshold in [0.3, 0.4, 0.5, 0.6, 0.7]:
-            # Convert probabilities to binary predictions
-            predictions = (outputs > threshold).float()
-            num_zeros = (y_test == 0).sum().item()
-            num_ones = (y_test == 1).sum().item()
+        
+        # converting the y_test and output tensors to numpy arrays to calculate the evaluation metrics 
+        y_true = y_test[mask_test == 1].cpu().numpy().astype(int)
+        y_pred = torch.sigmoid(outputs)[mask_test == 1].cpu().numpy()
 
-            print("0s (not delayed):", num_zeros)
-            print("1s (delayed):", num_ones)
-            
-            lstm_metrics = compute_metrics(predictions, y_test, mask_test)
-            accuracy, precision_delayed, recall_delayed, f1_delayed, precision_not_delayed, recall_not_delayed, f1_not_delayed, cn_matrix = lstm_metrics
-            
-            tn, fp, fn, tp = cn_matrix[0], cn_matrix[1], cn_matrix[2], cn_matrix[3]
-            print(f"\n Confusion Matrix")
-            print(f"TN (correclty predicted not delayed)={tn} \n FP (falsely predicted as delayed)={fp} \n FN (falsely predicted as not delayed)={fn} \n TP (correctly predicted as delayed)={tp}")
+        precision, recall, thresholds = precision_recall_curve(y_true, y_pred)
 
-            print(f"Threshold: {threshold}")
-            print(f"Accuracy: {accuracy:.4f}")
-            print(f"Precision (predicting delayed): {precision_delayed:.4f}")
-            print(f"Recall (predicting delayed): {recall_delayed:.4f}") 
-            print(f"Precision (predicting not delayed): {precision_not_delayed:.4f}")
-            print(f"Recall (predicting not delayed): {recall_not_delayed:.4f}")
-            print(f"F1 Score (predicting delayed): {f1_delayed:.4f}")
-            print(f"F1 Score (predicting not delayed): {f1_not_delayed:.4f}")
+        f1 = (2 * precision * recall) / (precision + recall + 1e-8)
+        
+        f1 = f1[:-1]  # thresholds is shorter by 1
+
+        best_idx = np.argmax(f1) 
+        best_thresh = thresholds[best_idx]
+
+        print("Best threshold:", best_thresh)
+        print("Best F1:", f1[best_idx])
+        print("Best Precision:", precision[best_idx])
+        print("Best Recall:", recall[best_idx])
+        
+
+        # apply best threshold on predictions
+        y_preds = (y_pred >= best_thresh).astype(int)
+
+        # obtain confusion matrix
+        cm = confusion_matrix(y_true, y_preds)
+        tn, fp, fn, tp = cm.ravel()
+
+        print("\nConfusion Matrix:")
+        print(cm)
+
+        print("\nTN:", tn, "FP:", fp, "FN:", fn, "TP:", tp)
             
 class ReadyLSTM:
     def __init__(self):
         self.df = preprocess_for_model()
         self.lookup = self.build_delay_lookup()
-        # TODO: persist scaler later
         data_to_model(self.df)
         self.scaler = scaler
     
@@ -448,9 +435,11 @@ class ReadyLSTM:
         )["delay_sec"].mean()
 
         return grouped.to_dict()
-    
-    # returns existing trips that go from the origin stop to the destination stop      
+     
     def get_valid_trips(self, route_df, origin_stop, destination_stop):
+        """    
+        returns existing trips that go from the origin stop to the destination stop      
+        """
         trips = []
         trips_in_route = route_df.groupby("trip_id")
 
@@ -469,8 +458,10 @@ class ReadyLSTM:
 
         return trips
     
-    # get next possible arrival time at arrival stop and "trip" the user wants to go on
     def get_next_trip(self, route_df, trips, origin_stop, current_time_sec):
+        """    
+        get next possible arrival time at arrival stop and "trip" the user wants to go on
+        """
         candidates = []
         for trip_id in trips:
             trip = route_df[route_df["trip_id"] == trip_id]
@@ -487,8 +478,10 @@ class ReadyLSTM:
         # earliest future trip
         return sorted(candidates, key=lambda x: x[1])[0][0]
     
-    # returns the entire expected route arr/dest info from origin -> destination 
     def build_trip_sequence(self, route_df, trip_id, origin_stop, destination_stop):
+        """    
+        returns the entire expected route arr/dest info from origin -> destination 
+        """
         trip = route_df[route_df["trip_id"] == trip_id].copy()
         # so the stops are in order
         trip = trip.sort_values("stop_sequence")
@@ -510,8 +503,10 @@ class ReadyLSTM:
 
         return seq_df
 
-    # one hot encoding of the route
     def one_hot_encode_route(self, seq_df, route_cols, route):
+        """    
+        one hot encoding of the route
+        """
         for col in route_cols:
             if col not in seq_df.columns:
                 if route in col:
@@ -521,8 +516,11 @@ class ReadyLSTM:
 
         return seq_df
 
-    # use existing knowledge of delay patterns for a specific route, stop, hour
     def estimate_prev_delayed(self, seq_df, expected_delay_dict, route_id):
+        """    
+        use existing knowledge of delay patterns for a specific route, stop, hour
+        """
+        
         prev = 0
         prev2 = 0
 
@@ -552,9 +550,7 @@ class ReadyLSTM:
 
     def to_tensor(self, seq_df):
         X = seq_df[features].values
-        print("shape of input", X.shape)
         tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
-        print("shape of tensor", tensor.shape)
         return tensor
     
     def time_to_seconds(self, dt):
@@ -569,7 +565,6 @@ class ReadyLSTM:
         return probs.squeeze().numpy()
     
     def predict(self, obs):
-        print(obs)
         route, arr_stop, dest_stop, cur_datetime = obs
         current_time_sec = self.time_to_seconds(cur_datetime)
         
@@ -590,25 +585,20 @@ class ReadyLSTM:
         final_seq_input = self.estimate_prev_delayed(trip_seq_df_3, expected_delay_dict, route)
         filtered_input = final_seq_input[features]
         
-        print(filtered_input.describe())
-        print(filtered_input.min())
-        print(filtered_input.max())
-        
         filtered_input[scale_cols] = self.scaler.transform(filtered_input[scale_cols])
         
         X = self.to_tensor(filtered_input)
 
         
-        model = DelayPredictor(input_size=12, hidden_size=128)
+        model = DelayPredictor(input_size=8, hidden_size=128)
 
         # load weights of the best model
-        model.load_state_dict(torch.load("src/models/model_storage/best_model_weights_2.pt"))
+        model.load_state_dict(torch.load("src/models/model_storage/lstm_model.pt"))
 
         probs = self.predict_prob(model, X)
 
         arrival_prob = probs[0]
         destination_prob = probs[-1]
-        print(arrival_prob, destination_prob)
         delayed = False
         if destination_prob > 0.7 and arrival_prob > 0.7:
             delayed = "Very Likely"
@@ -618,13 +608,13 @@ class ReadyLSTM:
             delayed = "Not Likely"
             
         return trip_seq_df_1, {
-            "Arrival at Starting Point Delay": f'The next {route} Line train arriving at {arr_stop} has a {int(arrival_prob * 100)}% chance of being delayed',
-            "Arrival at Destination Delay": f'The {route} Line train heading to {dest_stop} has a {int(destination_prob * 100)}% chance of being delayed',
+            "Arrival at Starting Point Delay": f'The LSTM predicts the next {route} Line train arriving at {arr_stop} has a {int(arrival_prob * 100)}% chance of being delayed',
+            "Arrival at Destination Delay": f'The LSTM predicts the next {route} Line train heading to {dest_stop} has a {int(destination_prob * 100)}% chance of being delayed',
             "Delay is": delayed
         }
         
         
-
+# testing the model with mock user input before frontend was finalized
 # if __name__ == "__main__":
 
 #     final_data = preprocess_for_model()
@@ -633,8 +623,12 @@ class ReadyLSTM:
 #            pd.Timestamp(2026, 4, 9, 6, 30)]
 
 #     print(predict(obs))
-    
+  
+# to train  
 # main(True)
+
+# to test
+# main(Test)
     
     
     
