@@ -16,7 +16,7 @@ from src.models.hmm_model import ReadyHMM
 from src.models.lstm import ReadyLSTM
 
 
-# cache the model so it is not constantly reloading it every time
+# cache the models so it is not constantly reloading it every time
 @st.cache_resource
 def load_lstm_model():
     return ReadyLSTM()
@@ -51,7 +51,7 @@ def display_route(stop_ids):
         how="left"
     )
     locs = stops_lat_lon_df[["stop_lon", "stop_lat"]].dropna().values.tolist()    
-    print(locs)
+
     layer = pdk.Layer(
         "PathLayer",
         data=[{"path": locs}],
